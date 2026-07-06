@@ -153,7 +153,7 @@ where
                         let first_node = Arc::new(Mutex::new(first_node));
 
                         drop(_global_guard);
-                        if let Ok(_) = self.index_lock.try_write() {
+                        if let Ok(_write_guard) = self.index_lock.try_write() {
                             #[cfg(feature = "cdc")]
                             {
                                 let node_insertion = ChangeEvent::CreateNode {
@@ -231,8 +231,7 @@ where
                         #[cfg(feature = "cdc")]
                         {
                             for unassigned_event in value_cdc {
-                                let event_id =
-                                    self.event_id.fetch_add(1, Ordering::AcqRel).into();
+                                let event_id = self.event_id.fetch_add(1, Ordering::AcqRel).into();
                                 cdc.push(unassigned_event.assign_id(event_id));
                             }
                         }
@@ -246,8 +245,7 @@ where
                         #[cfg(feature = "cdc")]
                         {
                             for unassigned_event in value_cdc {
-                                let event_id =
-                                    self.event_id.fetch_add(1, Ordering::AcqRel).into();
+                                let event_id = self.event_id.fetch_add(1, Ordering::AcqRel).into();
                                 cdc.push(unassigned_event.assign_id(event_id));
                             }
                         }
@@ -365,9 +363,7 @@ where
         loop {
             let mut cdc = vec![];
             let _global_guard = self.index_lock.read();
-            if let Some(target_node_entry) =
-                self.index.lower_bound(Bound::Included(&value))
-            {
+            if let Some(target_node_entry) = self.index.lower_bound(Bound::Included(&value)) {
                 let mut node_guard = target_node_entry.value().lock_arc();
                 let old_max = node_guard.max().cloned();
                 let deleted = NodeLike::delete(&mut *node_guard, value);
@@ -1962,7 +1958,7 @@ mod tests {
         }
 
         let set_clone = Arc::clone(&set);
-        let _ = thread::spawn(move || {
+        let handle = thread::spawn(move || {
             for _ in 0..1000 {
                 let mut _sum = 0;
                 for &value in set_clone.iter() {
@@ -1974,5 +1970,6 @@ mod tests {
         for i in 10_000..20_000 {
             set.insert(i);
         }
+        handle.join().unwrap();
     }
 }
