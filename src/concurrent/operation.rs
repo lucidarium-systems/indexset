@@ -51,7 +51,7 @@ where
                         let mut old_value: Option<T> = None;
                         let mut insert_attempted = false;
                         if let Some(max) = guard.max().cloned() {
-                            if max > value {
+                            if max >= value {
                                 let (inserted, idx) = NodeLike::insert(&mut *guard, value.clone());
                                 insert_attempted = true;
                                 if !inserted {

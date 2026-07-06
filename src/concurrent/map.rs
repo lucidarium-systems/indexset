@@ -522,11 +522,19 @@ mod tests {
                 ChangeEvent::RemoveAt {
                     max_value,
                     index,
-                    value: _,
+                    value,
                     event_id: _,
                 } => {
+                    let mut max_removed = false;
                     if let Some(node) = self.nodes.get_mut(&max_value.key) {
                         node.remove(*index);
+                        max_removed = max_value.key == value.key;
+                    }
+                    if max_removed {
+                        let node = self.nodes.remove(&max_value.key).unwrap();
+                        if let Some(new_max) = node.last() {
+                            self.nodes.insert(new_max.key.clone(), node);
+                        }
                     }
                 }
                 ChangeEvent::SplitNode {
