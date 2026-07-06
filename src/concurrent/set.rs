@@ -231,7 +231,8 @@ where
                         #[cfg(feature = "cdc")]
                         {
                             for unassigned_event in value_cdc {
-                                let event_id = self.event_id.fetch_add(1, Ordering::AcqRel).into();
+                                let event_id =
+                                    self.event_id.fetch_add(1, Ordering::AcqRel).into();
                                 cdc.push(unassigned_event.assign_id(event_id));
                             }
                         }
@@ -245,7 +246,8 @@ where
                         #[cfg(feature = "cdc")]
                         {
                             for unassigned_event in value_cdc {
-                                let event_id = self.event_id.fetch_add(1, Ordering::AcqRel).into();
+                                let event_id =
+                                    self.event_id.fetch_add(1, Ordering::AcqRel).into();
                                 cdc.push(unassigned_event.assign_id(event_id));
                             }
                         }
@@ -363,7 +365,9 @@ where
         loop {
             let mut cdc = vec![];
             let _global_guard = self.index_lock.read();
-            if let Some(target_node_entry) = self.index.lower_bound(Bound::Included(&value)) {
+            if let Some(target_node_entry) =
+                self.index.lower_bound(Bound::Included(&value))
+            {
                 let mut node_guard = target_node_entry.value().lock_arc();
                 let old_max = node_guard.max().cloned();
                 let deleted = NodeLike::delete(&mut *node_guard, value);
