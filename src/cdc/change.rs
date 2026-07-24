@@ -1,6 +1,6 @@
 #[cfg(feature = "multimap")]
 use {
-    crate::core::multipair::MultiPair,
+    crate::core::multipair::{OrdMultiPair, RandomMultiPair},
     crate::core::pair::Pair,
 };
 
@@ -149,48 +149,63 @@ impl<T> ChangeEventUnassigned<T> {
 
 
 #[cfg(feature = "multimap")]
-impl<K: Ord, V: PartialEq> From<ChangeEvent<MultiPair<K, V>>> for ChangeEvent<Pair<K, V>> {
-    fn from(ev: ChangeEvent<MultiPair<K, V>>) -> Self {
-        match ev {
-            ChangeEvent::InsertAt {
-                event_id,
-                max_value,
-                value,
-                index,
-            } => ChangeEvent::InsertAt {
-                event_id,
-                max_value: max_value.into(),
-                value: value.into(),
-                index,
-            },
-            ChangeEvent::RemoveAt {
-                event_id,
-                max_value,
-                value,
-                index,
-            } => ChangeEvent::RemoveAt {
-                event_id,
-                max_value: max_value.into(),
-                value: value.into(),
-                index,
-            },
-            ChangeEvent::CreateNode { event_id, max_value } => ChangeEvent::CreateNode {
-                event_id,
-                max_value: max_value.into(),
-            },
-            ChangeEvent::RemoveNode { event_id, max_value } => ChangeEvent::RemoveNode {
-                event_id,
-                max_value: max_value.into(),
-            },
-            ChangeEvent::SplitNode {
-                event_id,
-                max_value,
-                split_index,
-            } => ChangeEvent::SplitNode {
-                event_id,
-                max_value: max_value.into(),
-                split_index,
-            },
-        }
+fn multipair_change_event_into_pair<K, V, M>(ev: ChangeEvent<M>) -> ChangeEvent<Pair<K, V>>
+where
+    M: Into<Pair<K, V>>,
+{
+    match ev {
+        ChangeEvent::InsertAt {
+            event_id,
+            max_value,
+            value,
+            index,
+        } => ChangeEvent::InsertAt {
+            event_id,
+            max_value: max_value.into(),
+            value: value.into(),
+            index,
+        },
+        ChangeEvent::RemoveAt {
+            event_id,
+            max_value,
+            value,
+            index,
+        } => ChangeEvent::RemoveAt {
+            event_id,
+            max_value: max_value.into(),
+            value: value.into(),
+            index,
+        },
+        ChangeEvent::CreateNode { event_id, max_value } => ChangeEvent::CreateNode {
+            event_id,
+            max_value: max_value.into(),
+        },
+        ChangeEvent::RemoveNode { event_id, max_value } => ChangeEvent::RemoveNode {
+            event_id,
+            max_value: max_value.into(),
+        },
+        ChangeEvent::SplitNode {
+            event_id,
+            max_value,
+            split_index,
+        } => ChangeEvent::SplitNode {
+            event_id,
+            max_value: max_value.into(),
+            split_index,
+        },
+    }
+}
+
+#[cfg(feature = "multimap")]
+impl<K, V> From<ChangeEvent<RandomMultiPair<K, V>>> for ChangeEvent<Pair<K, V>> {
+    fn from(ev: ChangeEvent<RandomMultiPair<K, V>>) -> Self {
+        multipair_change_event_into_pair(ev)
+    }
+}
+
+#[cfg(feature = "multimap")]
+impl<K, V> From<ChangeEvent<OrdMultiPair<K, V>>> for ChangeEvent<Pair<K, V>> {
+    fn from(ev: ChangeEvent<OrdMultiPair<K, V>>) -> Self {
+        multipair_change_event_into_pair(ev)
     }
 }

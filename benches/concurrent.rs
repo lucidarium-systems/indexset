@@ -1,7 +1,10 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use crossbeam_skiplist::SkipSet;
-use rand::{thread_rng, Rng};
+use indexset::concurrent::multimap::BTreeMultiMap;
+use indexset::core::multipair::OrdMultiPair;
+use rand::{rngs::StdRng, thread_rng, Rng, SeedableRng};
 use scc::TreeIndex;
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::thread;
 
@@ -16,6 +19,8 @@ const NUM_WRITERS: usize = 10;
 const NUM_THREADS: usize = NUM_READERS + NUM_WRITERS;
 const OPERATIONS_PER_THREAD: usize = 100_000;
 const TOTAL_OPERATIONS: usize = NUM_THREADS * OPERATIONS_PER_THREAD;
+const MULTIMAP_REMOVE_ENTRIES: usize = 20_000;
+const MULTIMAP_REMOVE_SEED: u64 = 42;
 
 // fn generate_operations(write_ratio: f64) -> Vec<Vec<Op>> {
 //     let mut rng = thread_rng();
@@ -177,5 +182,94 @@ fn bench_concurrent_btreeset(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_concurrent_btreeset);
+fn removal_entries(values_per_key: RangeInclusive<usize>) -> Vec<(usize, usize)> {
+    let mut rng = StdRng::seed_from_u64(MULTIMAP_REMOVE_SEED);
+    let mut entries = Vec::with_capacity(MULTIMAP_REMOVE_ENTRIES);
+    let mut key = 0;
+
+    while entries.len() < MULTIMAP_REMOVE_ENTRIES {
+        let value_count = rng.random_range(values_per_key.clone());
+        entries.extend((0..value_count).map(|value| (key, value)));
+        key += 1;
+    }
+
+    entries
+}
+
+fn build_random_multimap(entries: &[(usize, usize)]) -> BTreeMultiMap<usize, usize> {
+    let map = BTreeMultiMap::<usize, usize>::new();
+    for (key, value) in entries {
+        map.insert(*key, *value);
+    }
+
+    map
+}
+
+fn build_ord_multimap(
+    entries: &[(usize, usize)],
+) -> BTreeMultiMap<
+    usize,
+    usize,
+    Vec<OrdMultiPair<usize, usize>>,
+    OrdMultiPair<usize, usize>,
+> {
+    let map = BTreeMultiMap::<
+        usize,
+        usize,
+        Vec<OrdMultiPair<usize, usize>>,
+        OrdMultiPair<usize, usize>,
+    >::new();
+    for (key, value) in entries {
+        map.insert(*key, *value);
+    }
+
+    map
+}
+
+fn bench_multimap_removal(c: &mut Criterion) {
+    let usual_entries = removal_entries(1..=3);
+    let many_entries = removal_entries(1_000..=2_000);
+    let usual_target = *usual_entries.last().unwrap();
+    let many_target = *many_entries.last().unwrap();
+
+    let mut group = c.benchmark_group("BTreeMultiMap remove pair");
+    group.warm_up_time(std::time::Duration::from_millis(500));
+    group.measurement_time(std::time::Duration::from_millis(500));
+
+    group.bench_function(BenchmarkId::new("random", "1-3 values per key"), |b| {
+        b.iter_batched_ref(
+            || build_random_multimap(&usual_entries),
+            |map| black_box(map.remove(&usual_target.0, &usual_target.1)),
+            BatchSize::LargeInput,
+        );
+    });
+
+    group.bench_function(BenchmarkId::new("ord", "1-3 values per key"), |b| {
+        b.iter_batched_ref(
+            || build_ord_multimap(&usual_entries),
+            |map| black_box(map.remove(&usual_target.0, &usual_target.1)),
+            BatchSize::LargeInput,
+        );
+    });
+
+    group.bench_function(BenchmarkId::new("random", "1000-2000 values per key"), |b| {
+        b.iter_batched_ref(
+            || build_random_multimap(&many_entries),
+            |map| black_box(map.remove(&many_target.0, &many_target.1)),
+            BatchSize::LargeInput,
+        );
+    });
+
+    group.bench_function(BenchmarkId::new("ord", "1000-2000 values per key"), |b| {
+        b.iter_batched_ref(
+            || build_ord_multimap(&many_entries),
+            |map| black_box(map.remove(&many_target.0, &many_target.1)),
+            BatchSize::LargeInput,
+        );
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_concurrent_btreeset, bench_multimap_removal);
 criterion_main!(benches);
