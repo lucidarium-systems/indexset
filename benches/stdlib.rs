@@ -1,13 +1,13 @@
 use criterion::{criterion_group, criterion_main, Criterion};
+use rand::rng;
 use rand::seq::SliceRandom;
-use rand::thread_rng;
 use scc::TreeIndex;
 use std::hint::black_box;
 
 fn criterion_benchmark(c: &mut Criterion) {
     let n = 100000;
     let mut input: Vec<usize> = (0..n).collect();
-    input.shuffle(&mut thread_rng());
+    input.shuffle(&mut rng());
 
     c.bench_function("stdlib insert 100k", |b| {
         b.iter(|| {
@@ -47,7 +47,8 @@ fn criterion_benchmark(c: &mut Criterion) {
             let treeindex = TreeIndex::new();
 
             input.iter().for_each(|item| {
-                black_box(treeindex.insert(*item, ()).unwrap());
+                let _: () = treeindex.insert(*item, ()).unwrap();
+                black_box(());
             });
 
             assert_eq!(treeindex.len(), n);

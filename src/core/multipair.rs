@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::pair::Pair;
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Default, Clone, Hash)]
+#[derive(Debug, Default, Clone)]
 pub struct MultiPair<K, V> {
     pub key: K,
     pub value: V,
@@ -24,6 +24,9 @@ impl<K: Ord, V: PartialEq> MultiPair<K, V> {
             discriminator: fastrand::u64(..),
         }
     }
+    // SAFETY: The `value` field is never read for sentinel values - only `key` and
+    // `discriminator` are used for ordering.
+    #[allow(clippy::uninit_assumed_init)]
     pub fn with_infimum(key: K) -> Self {
         Self {
             key,
@@ -31,6 +34,9 @@ impl<K: Ord, V: PartialEq> MultiPair<K, V> {
             discriminator: INFIMUM,
         }
     }
+    // SAFETY: The `value` field is never read for sentinel values - only `key` and
+    // `discriminator` are used for ordering.
+    #[allow(clippy::uninit_assumed_init)]
     pub fn with_supremum(key: K) -> Self {
         Self {
             key,
@@ -75,6 +81,17 @@ impl<K: Ord, V: PartialEq> Ord for MultiPair<K, V> {
 impl<K: Ord, V: PartialEq> PartialOrd for MultiPair<K, V> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+impl<K, V> std::hash::Hash for MultiPair<K, V>
+where
+    K: std::hash::Hash,
+    V: std::hash::Hash,
+{
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.key.hash(state);
+        self.value.hash(state);
     }
 }
 
@@ -167,10 +184,7 @@ mod test {
         NodeLike::insert(&mut vec, p3c.clone());
         assert_eq!(vec.len(), 10);
 
-        let start_1 = vec
-            .rank(Included(&MultiPair::with_infimum(1)), true)
-            .or_else(|| Some(0))
-            .unwrap();
+        let start_1 = vec.rank(Included(&MultiPair::with_infimum(1)), true).unwrap_or(0);
         let end_1 = vec.rank(Excluded(&MultiPair::with_supremum(1)), true).unwrap();
         let range_1 = &vec[start_1..=end_1];
         assert_eq!(range_1.len(), 3);
@@ -186,7 +200,7 @@ mod test {
         assert!(range_2.contains(&p1c));
         assert!(range_2.contains(&p2a));
         assert!(range_2.contains(&p2b));
-        assert_ne!(range_2.contains(&p3a), true);
+        assert!(!range_2.contains(&p3a));
 
         let start_3 = vec.rank(Included(&MultiPair::with_infimum(3)), true).unwrap() + 1;
         let end_3 = vec.rank(Excluded(&MultiPair::with_supremum(3)), true).unwrap();

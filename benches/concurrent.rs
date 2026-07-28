@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use crossbeam_skiplist::SkipSet;
-use rand::{thread_rng, Rng};
+use rand::{rng, Rng};
 use scc::TreeIndex;
 use std::sync::Arc;
 use std::thread;
@@ -37,21 +37,23 @@ const TOTAL_OPERATIONS: usize = NUM_THREADS * OPERATIONS_PER_THREAD;
 // }
 
 fn generate_operations(write_ratio: f64) -> Vec<Vec<Op>> {
-    let mut rng = thread_rng();
-    let mut all_operations = vec![Vec::with_capacity(OPERATIONS_PER_THREAD); NUM_THREADS];
+    let mut rng = rng();
+    let mut all_operations: Vec<Vec<Op>> = (0..NUM_THREADS)
+        .map(|_| Vec::with_capacity(OPERATIONS_PER_THREAD))
+        .collect();
 
-    for thread_idx in 0..NUM_THREADS {
+    for (thread_idx, operations) in all_operations.iter_mut().enumerate() {
         let range_start = thread_idx * (TOTAL_OPERATIONS / NUM_THREADS);
         let range_end = (thread_idx + 1) * (TOTAL_OPERATIONS / NUM_THREADS);
 
         for _ in 0..OPERATIONS_PER_THREAD {
-            let value = rng.gen_range(range_start..range_end);
-            let operation = if thread_idx < NUM_WRITERS || rng.gen::<f64>() < write_ratio {
+            let value = rng.random_range(range_start..range_end);
+            let operation = if thread_idx < NUM_WRITERS || rng.random::<f64>() < write_ratio {
                 Op::Write(value)
             } else {
                 Op::Read(value)
             };
-            all_operations[thread_idx].push(operation);
+            operations.push(operation);
         }
     }
     all_operations
@@ -94,9 +96,8 @@ fn bench_btreeset_with_ratio(c: &mut Criterion, write_ratio: f64) {
                             black_box(set.contains(&item));
                         },
                         |set, item| {
-                            black_box({
-                                let _ = set.insert(item, ());
-                            });
+                            let _ = set.insert(item, ());
+                            black_box(());
                         },
                     );
                 });

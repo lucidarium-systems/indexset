@@ -129,11 +129,11 @@ impl<T: Ord> BTreeSet<T> {
     ///
     /// let mut set: BTreeSet<i32> = BTreeSet::with_maximum_node_size(128);
     pub fn with_maximum_node_size(maximum_node_size: usize) -> Self {
-        let mut new: Self = Default::default();
-        new.inner = vec![Node::with_capacity(maximum_node_size)];
-        new.node_capacity = maximum_node_size;
-
-        new
+        Self {
+            inner: vec![Node::with_capacity(maximum_node_size)],
+            node_capacity: maximum_node_size,
+            ..Default::default()
+        }
     }
     /// Clears the set, removing all elements.
     ///
@@ -260,7 +260,7 @@ impl<T: Ord> BTreeSet<T> {
     }
     fn get_mut_index(&mut self, index: usize) -> Option<&mut T> {
         let (node_idx, position_within_node) = self.locate_ith(index);
-        if let Some(_) = self.inner.get(node_idx) {
+        if self.inner.get(node_idx).is_some() {
             return self.inner[node_idx].get_mut(position_within_node);
         }
 
@@ -467,7 +467,7 @@ impl<T: Ord> BTreeSet<T> {
 
         let mut decrease_length = false;
         // check whether the node has to be deleted
-        if self.inner[node_idx].len() == 0 {
+        if self.inner[node_idx].is_empty() {
             // delete it as long as it is not the last remaining node
             if self.inner.len() > 1 {
                 self.inner.remove(node_idx);
@@ -611,8 +611,8 @@ impl<T: Ord> BTreeSet<T> {
     /// assert_eq!(set.first(), Some(&1));
     /// ```
     pub fn first(&self) -> Option<&T> {
-        if let Some(candidate_node) = self.inner.get(0) {
-            return candidate_node.get(0);
+        if let Some(candidate_node) = self.inner.first() {
+            return candidate_node.first();
         }
 
         None
@@ -635,9 +635,9 @@ impl<T: Ord> BTreeSet<T> {
     /// assert_eq!(set.last(), Some(&2));
     /// ```
     pub fn last(&self) -> Option<&T> {
-        if let Some(candidate_node) = self.inner.get(self.inner.len() - 1) {
-            if candidate_node.len() > 0 {
-                return candidate_node.get(candidate_node.len() - 1);
+        if let Some(candidate_node) = self.inner.last() {
+            if !candidate_node.is_empty() {
+                return candidate_node.last();
             }
         }
 
@@ -836,7 +836,7 @@ impl<T: Ord> BTreeSet<T> {
     /// assert_eq!(set_iter.next(), Some(&3));
     /// assert_eq!(set_iter.next(), None);
     /// ```
-    pub fn iter(&self) -> Iter<T> {
+    pub fn iter(&self) -> Iter<'_, T> {
         Iter::new(self)
     }
     /// Visits the elements representing the union,
@@ -1017,7 +1017,7 @@ impl<T: Ord> BTreeSet<T> {
         latter_half.inner = remaining_nodes;
         latter_half.index = FenwickTree::from_iter(latter_half.inner.iter().map(|node| node.len()));
 
-        if self.inner[node_idx].len() == 0 && self.inner.len() > 1 {
+        if self.inner[node_idx].is_empty() && self.inner.len() > 1 {
             self.inner.remove(node_idx);
         }
 
@@ -1073,7 +1073,7 @@ impl<T: Ord> BTreeSet<T> {
         latter_half.inner = remaining_nodes;
         latter_half.index = FenwickTree::from_iter(latter_half.inner.iter().map(|node| node.len()));
 
-        if self.inner[node_idx].len() == 0 && self.inner.len() > 1 {
+        if self.inner[node_idx].is_empty() && self.inner.len() > 1 {
             self.inner.remove(node_idx);
         }
 
@@ -1501,7 +1501,7 @@ where
                 } else {
                     self.current_left = self.left_iter.next();
                 }
-            } else if let Some(_) = self.current_right {
+            } else if self.current_right.is_some() {
                 self.current_right = self.right_iter.next();
             } else {
                 return None;
@@ -1859,7 +1859,7 @@ where
         self.key
     }
     pub fn insert(self, value: V) -> &'a mut V {
-        let rank = self.map.set.rank_cmp(|item: &Pair<K, V>| &item.key < &self.key);
+        let rank = self.map.set.rank_cmp(|item: &Pair<K, V>| item.key < self.key);
         self.map.insert(self.key, value);
 
         self.map.get_mut_index(rank).unwrap()
@@ -2354,7 +2354,7 @@ where
     /// let (first_key, first_value) = map.iter().next().unwrap();
     /// assert_eq!((*first_key, *first_value), (1, "a"));
     /// ```
-    pub fn iter(&self) -> IterMap<K, V> {
+    pub fn iter(&self) -> IterMap<'_, K, V> {
         IterMap { inner: self.set.iter() }
     }
     /// Gets a mutable iterator over the entries of the map, sorted by key.
@@ -2379,7 +2379,7 @@ where
     ///     }
     /// }
     /// ```
-    pub fn iter_mut(&mut self) -> IterMut<K, V> {
+    pub fn iter_mut(&mut self) -> IterMut<'_, K, V> {
         let last_node_idx = self.set.inner.len() - 1;
         let len = self.set.len();
 
@@ -2444,7 +2444,7 @@ where
     /// let keys: Vec<_> = a.keys().cloned().collect();
     /// assert_eq!(keys, [1, 2]);
     /// ```
-    pub fn keys(&self) -> Keys<K, V> {
+    pub fn keys(&self) -> Keys<'_, K, V> {
         Keys { inner: self.set.iter() }
     }
     /// Returns the last key-value pair in the map.
@@ -2622,7 +2622,7 @@ where
     /// }
     /// assert_eq!(Some((&5, &"b")), map.range(4..).next());
     /// ```
-    pub fn range<Q, R>(&self, range: R) -> RangeMap<K, V>
+    pub fn range<Q, R>(&self, range: R) -> RangeMap<'_, K, V>
     where
         Q: Ord + ?Sized,
         K: Borrow<Q>,
@@ -2634,7 +2634,7 @@ where
             inner: self.set.range_idx(start_idx..=end_idx),
         }
     }
-    pub fn range_idx<R>(&self, range: R) -> RangeMap<K, V>
+    pub fn range_idx<R>(&self, range: R) -> RangeMap<'_, K, V>
     where
         R: RangeBounds<usize>,
     {
@@ -2664,7 +2664,7 @@ where
                 rank - 1
             }
             Bound::Unbounded => {
-                if self.len() == 0 {
+                if self.is_empty() {
                     // Empty map, return empty range
                     return (1, 0);
                 }
@@ -2702,7 +2702,7 @@ where
     ///     println!("{name} => {balance}");
     /// }
     /// ```
-    pub fn range_mut<Q, R>(&mut self, range: R) -> RangeMut<K, V>
+    pub fn range_mut<Q, R>(&mut self, range: R) -> RangeMut<'_, K, V>
     where
         Q: Ord + ?Sized,
         K: Borrow<Q>,
@@ -2712,7 +2712,7 @@ where
 
         self.range_mut_idx(start_idx..=end_idx)
     }
-    pub fn range_mut_idx<R>(&mut self, range: R) -> RangeMut<K, V>
+    pub fn range_mut_idx<R>(&mut self, range: R) -> RangeMut<'_, K, V>
     where
         R: RangeBounds<usize>,
     {
@@ -2925,7 +2925,7 @@ where
     /// let values: Vec<&str> = a.values().cloned().collect();
     /// assert_eq!(values, ["hello", "goodbye"]);
     /// ```
-    pub fn values(&self) -> Values<K, V> {
+    pub fn values(&self) -> Values<'_, K, V> {
         Values { inner: self.set.iter() }
     }
     /// Gets a mutable iterator over the values of the map, in order by key.
@@ -2949,7 +2949,7 @@ where
     /// assert_eq!(values, [String::from("hello!"),
     ///                     String::from("goodbye!")]);
     /// ```
-    pub fn values_mut(&mut self) -> ValuesMut<K, V> {
+    pub fn values_mut(&mut self) -> ValuesMut<'_, K, V> {
         ValuesMut { inner: self.iter_mut() }
     }
     /// Gets the given key's corresponding entry in the map for in-place manipulation.
@@ -3784,7 +3784,7 @@ mod tests {
                 acc
             });
 
-        let actual_output: Vec<isize> = actual_node.iter().cloned().collect();
+        let actual_output = actual_node.to_vec();
 
         assert_eq!(expected_output, actual_output);
         assert_eq!(*actual_node.last().unwrap(), 10);
@@ -3794,20 +3794,20 @@ mod tests {
     fn test_halve() {
         let mut input: Vec<isize> = vec![];
         for item in 0..DEFAULT_INNER_SIZE {
-            input.push(item.clone() as isize);
+            input.push(item as isize);
         }
 
         let mut former_node = Node::with_capacity(DEFAULT_INNER_SIZE);
         input.iter().for_each(|item| {
-            NodeLike::insert(&mut former_node, item.clone());
+            NodeLike::insert(&mut former_node, *item);
         });
         let latter_node = former_node.halve();
 
         let expected_former_output: Vec<isize> = input[0..DEFAULT_CUTOFF].to_vec();
         let expected_latter_output: Vec<isize> = input[DEFAULT_CUTOFF..].to_vec();
 
-        let actual_former_output: Vec<isize> = former_node.iter().cloned().collect();
-        let actual_latter_output: Vec<isize> = latter_node.iter().cloned().collect();
+        let actual_former_output = former_node.to_vec();
+        let actual_latter_output = latter_node.to_vec();
 
         assert_eq!(expected_former_output, actual_former_output);
         assert_eq!(expected_latter_output, actual_latter_output);
@@ -3857,7 +3857,7 @@ mod tests {
         let input: Vec<usize> = (0..(DEFAULT_INNER_SIZE + 1)).into_iter().collect();
 
         let mut btree: BTreeSet<usize> = input.iter().fold(BTreeSet::new(), |mut acc, curr| {
-            acc.insert(curr.clone());
+            acc.insert(*curr);
             acc
         });
 
@@ -3876,7 +3876,7 @@ mod tests {
         let input: Vec<usize> = (0..(DEFAULT_INNER_SIZE + 1)).into_iter().collect();
 
         let mut btree: BTreeSet<usize> = input.iter().fold(BTreeSet::new(), |mut acc, curr| {
-            acc.insert(curr.clone());
+            acc.insert(*curr);
             acc
         });
 
@@ -3895,7 +3895,7 @@ mod tests {
         let input: Vec<usize> = (0..(DEFAULT_INNER_SIZE + 1)).into_iter().collect();
 
         let btree: BTreeSet<usize> = input.iter().fold(BTreeSet::new(), |mut acc, curr| {
-            acc.insert(curr.clone());
+            acc.insert(*curr);
             acc
         });
 
@@ -3939,7 +3939,7 @@ mod tests {
         let expected_output: Vec<usize> = (0..(DEFAULT_INNER_SIZE + 1)).collect();
 
         let btree: BTreeSet<usize> = input.iter().fold(BTreeSet::new(), |mut acc, curr| {
-            acc.insert(curr.clone());
+            acc.insert(*curr);
             acc
         });
 
@@ -3989,7 +3989,7 @@ mod tests {
         let btree = BTreeSet::from_iter((0..(DEFAULT_INNER_SIZE * 10)).rev());
         assert_eq!(btree.inner.len(), 19);
         let expected_forward = Vec::from_iter(0..(DEFAULT_INNER_SIZE * 10));
-        let actual_forward = Vec::from_iter(btree.clone().into_iter());
+        let actual_forward = Vec::from_iter(btree.clone());
         assert_eq!(expected_forward, actual_forward);
         let expected_backward = Vec::from_iter((0..(DEFAULT_INNER_SIZE * 10)).rev());
         let actual_backward = Vec::from_iter(btree.into_iter().rev());
@@ -4117,8 +4117,8 @@ mod tests {
 
     #[test]
     fn test_non_boolean_set_operations() {
-        let left_spine = BTreeSet::from_iter((0..(DEFAULT_INNER_SIZE + 1)).into_iter());
-        let right_spine = BTreeSet::from_iter(((DEFAULT_INNER_SIZE - 1)..((DEFAULT_INNER_SIZE + 1) * 2)).into_iter());
+        let left_spine = BTreeSet::from_iter(0..(DEFAULT_INNER_SIZE + 1));
+        let right_spine = BTreeSet::from_iter((DEFAULT_INNER_SIZE - 1)..((DEFAULT_INNER_SIZE + 1) * 2));
 
         let mut union = left_spine.clone();
         let mut temp_right_spine = right_spine.clone();
@@ -4161,9 +4161,9 @@ mod tests {
     fn test_boolean_set_operations() {
         let empty_set: BTreeSet<usize> = BTreeSet::new();
         assert!(empty_set.is_empty());
-        let a = BTreeSet::from_iter((0..(DEFAULT_INNER_SIZE + 1)).into_iter());
-        let b = BTreeSet::from_iter((0..(DEFAULT_INNER_SIZE + 2)).into_iter());
-        let c = BTreeSet::from_iter(((DEFAULT_INNER_SIZE + 2)..(DEFAULT_INNER_SIZE + 4)).into_iter());
+        let a = BTreeSet::from_iter(0..(DEFAULT_INNER_SIZE + 1));
+        let b = BTreeSet::from_iter(0..(DEFAULT_INNER_SIZE + 2));
+        let c = BTreeSet::from_iter((DEFAULT_INNER_SIZE + 2)..(DEFAULT_INNER_SIZE + 4));
 
         assert!(a.is_subset(&a));
         assert!(a.is_superset(&a));
@@ -4179,7 +4179,7 @@ mod tests {
     #[test]
     fn test_split_off() {
         let btree: BTreeSet<usize> = BTreeSet::from_iter(0..(DEFAULT_INNER_SIZE * 10));
-        for split in vec![
+        for split in [
             1,
             (DEFAULT_INNER_SIZE * 3) - 6,
             DEFAULT_INNER_SIZE,
@@ -4210,7 +4210,7 @@ mod tests {
 
     #[test]
     fn test_iterating_over_blocks() {
-        let btree = BTreeSet::from_iter((0..(DEFAULT_INNER_SIZE + 10)).into_iter());
+        let btree = BTreeSet::from_iter(0..(DEFAULT_INNER_SIZE + 10));
         assert_eq!(btree.iter().count(), (0..(DEFAULT_INNER_SIZE + 10)).count());
         assert_eq!(
             btree.range(0..DEFAULT_INNER_SIZE).count(),
@@ -4310,13 +4310,13 @@ mod tests {
         map.insert(2, 20);
         map.insert(3, 30);
 
-        let expected_forward = vec![(1, 10), (2, 20), (3, 30)];
+        let expected_forward = [(1, 10), (2, 20), (3, 30)];
         for (i, (k, v)) in map.iter_mut().enumerate() {
             assert_eq!(*k, expected_forward[i].0);
             assert_eq!(*v, expected_forward[i].1);
         }
 
-        let expected_backward = vec![(3, 30), (2, 20), (1, 10)];
+        let expected_backward = [(3, 30), (2, 20), (1, 10)];
         for (i, (k, v)) in map.iter_mut().rev().enumerate() {
             assert_eq!(*k, expected_backward[i].0);
             assert_eq!(*v, expected_backward[i].1);
