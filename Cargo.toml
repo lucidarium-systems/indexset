@@ -47,3 +47,4 @@ harness = false
 [[bench]]
 name = "concurrent"
 harness = false
+required-features = ["multimap"]
