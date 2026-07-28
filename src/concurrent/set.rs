@@ -153,7 +153,7 @@ where
                         let first_node = Arc::new(Mutex::new(first_node));
 
                         drop(_global_guard);
-                        if self.index_lock.try_write().is_ok() {
+                        if let Ok(_write_guard) = self.index_lock.try_write() {
                             #[cfg(feature = "cdc")]
                             {
                                 let node_insertion = ChangeEvent::CreateNode {
@@ -1791,7 +1791,7 @@ mod tests {
         }
 
         let set_clone = Arc::clone(&set);
-        let _ = thread::spawn(move || {
+        let handle = thread::spawn(move || {
             for _ in 0..1000 {
                 let mut _sum = 0;
                 for &value in set_clone.iter() {
@@ -1803,5 +1803,6 @@ mod tests {
         for i in 10_000..20_000 {
             set.insert(i);
         }
+        handle.join().unwrap();
     }
 }

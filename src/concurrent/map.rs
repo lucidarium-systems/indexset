@@ -491,6 +491,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_split_insert_replaces_left_split_max() {
+        let maximum_node_size = 4;
+        let map = BTreeMap::<usize, &str>::with_maximum_node_size(maximum_node_size);
+
+        for key in 0..maximum_node_size {
+            assert_eq!(map.insert(key, "old"), None);
+        }
+
+        let split_left_max = maximum_node_size / 2 - 1;
+
+        assert_eq!(map.insert(split_left_max, "new"), Some("old"));
+        assert_eq!(map.len(), maximum_node_size);
+        assert_eq!(map.get(&split_left_max).map(|entry| entry.get().value), Some("new"));
+        assert_eq!(map.iter().filter(|(key, _)| **key == split_left_max).count(), 1);
+    }
+
     #[derive(Debug, Default)]
     struct PersistedBTreeMap<K, V>
     where
@@ -527,11 +544,19 @@ mod tests {
                 ChangeEvent::RemoveAt {
                     max_value,
                     index,
-                    value: _,
+                    value,
                     event_id: _,
                 } => {
+                    let mut max_removed = false;
                     if let Some(node) = self.nodes.get_mut(&max_value.key) {
                         node.remove(*index);
+                        max_removed = max_value.key == value.key;
+                    }
+                    if max_removed {
+                        let node = self.nodes.remove(&max_value.key).unwrap();
+                        if let Some(new_max) = node.last() {
+                            self.nodes.insert(new_max.key.clone(), node);
+                        }
                     }
                 }
                 ChangeEvent::SplitNode {
