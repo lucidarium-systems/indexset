@@ -14,6 +14,10 @@ pub trait NodeLike<T: Ord> {
     #[allow(dead_code)]
     fn len(&self) -> usize;
     #[allow(dead_code)]
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    #[allow(dead_code)]
     fn capacity(&self) -> usize;
     #[allow(dead_code)]
     fn insert(&mut self, value: T) -> (bool, usize);
@@ -40,11 +44,13 @@ pub trait NodeLike<T: Ord> {
     #[allow(dead_code)]
     fn min(&self) -> Option<&T>;
     #[allow(dead_code)]
-    fn iter<'a>(&'a self) -> std::slice::Iter<'a, T> where T: 'a;
+    fn iter<'a>(&'a self) -> std::slice::Iter<'a, T>
+    where
+        T: 'a;
 }
 
 #[inline]
-fn search<Q, T: Ord>(haystack: &[T], needle: &Q) -> Result<usize, usize>
+fn search<Q, T>(haystack: &[T], needle: &Q) -> Result<usize, usize>
 where
     T: Borrow<Q> + Ord,
     Q: Ord + ?Sized,
@@ -56,7 +62,7 @@ where
         let p = haystack.as_ptr().cast::<T>();
         let mut m = j >> 1;
         while i != j {
-            match (*p.add(m)).borrow().cmp(&needle) {
+            match (*p.add(m)).borrow().cmp(needle) {
                 Ordering::Equal => return Ok(m),
                 Ordering::Less => {
                     i = m + 1;
@@ -78,14 +84,14 @@ enum Direction<'a, T> {
 }
 
 #[inline]
-fn compute_positions_to_skip<Q, T: Ord>(haystack: &[T], bound: std::ops::Bound<&Q>, forward: bool) -> Option<usize>
+fn compute_positions_to_skip<Q, T>(haystack: &[T], bound: std::ops::Bound<&Q>, forward: bool) -> Option<usize>
 where
     T: Borrow<Q> + Ord,
     Q: Ord + ?Sized,
 {
     match bound {
         // If the bound is unbounded, then no skipping is needed
-        std::ops::Bound::Unbounded => { None }
+        std::ops::Bound::Unbounded => None,
         std::ops::Bound::Included(value) | std::ops::Bound::Excluded(value) => {
             let mut positions_to_skip = -1;
             let iter = if forward {
@@ -97,11 +103,14 @@ where
             match iter {
                 Direction::Forward(iter) => {
                     for item in iter {
-                        match item.borrow().cmp(&value) {
+                        match item.borrow().cmp(value) {
                             Ordering::Less => positions_to_skip += 1,
-                                Ordering::Equal => match bound {
+                            Ordering::Equal => match bound {
                                 std::ops::Bound::Included(_) => break,
-                                std::ops::Bound::Excluded(_) => { positions_to_skip += 1; break },
+                                std::ops::Bound::Excluded(_) => {
+                                    positions_to_skip += 1;
+                                    break;
+                                }
                                 _ => unreachable!(),
                             },
                             Ordering::Greater => break,
@@ -110,11 +119,14 @@ where
                 }
                 Direction::Backward(iter) => {
                     for item in iter {
-                        match item.borrow().cmp(&value) {
+                        match item.borrow().cmp(value) {
                             Ordering::Greater => positions_to_skip += 1,
                             Ordering::Equal => match bound {
                                 std::ops::Bound::Included(_) => break,
-                                std::ops::Bound::Excluded(_) => { positions_to_skip += 1; break },
+                                std::ops::Bound::Excluded(_) => {
+                                    positions_to_skip += 1;
+                                    break;
+                                }
                                 _ => unreachable!(),
                             },
                             Ordering::Less => break,
@@ -159,7 +171,7 @@ impl<T: Ord> NodeLike<T> for Vec<T> {
     }
     #[inline]
     fn insert(&mut self, value: T) -> (bool, usize) {
-        match search(&self, &value) {
+        match search(self, &value) {
             Ok(idx) => (false, idx),
             Err(idx) => {
                 self.insert(idx, value);
@@ -173,10 +185,7 @@ impl<T: Ord> NodeLike<T> for Vec<T> {
         T: Borrow<Q> + Ord,
         Q: Ord + ?Sized,
     {
-        match search(&self, &value) {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+        search(self, value).is_ok()
     }
     #[inline]
     fn try_select<Q>(&self, value: &Q) -> Option<usize>
@@ -184,10 +193,7 @@ impl<T: Ord> NodeLike<T> for Vec<T> {
         T: Borrow<Q> + Ord,
         Q: Ord + ?Sized,
     {
-        match search(&self, &value) {
-            Ok(index) => Some(index),
-            Err(_) => None,
-        }
+        search(self, value).ok()
     }
     #[inline]
     fn rank<Q>(&self, bound: std::ops::Bound<&Q>, from_start: bool) -> Option<usize>
@@ -195,7 +201,7 @@ impl<T: Ord> NodeLike<T> for Vec<T> {
         T: Borrow<Q> + Ord,
         Q: Ord + ?Sized,
     {
-        compute_positions_to_skip(&self, bound, from_start)
+        compute_positions_to_skip(self, bound, from_start)
     }
     #[inline]
     fn delete<Q>(&mut self, value: &Q) -> Option<(T, usize)>
@@ -203,7 +209,7 @@ impl<T: Ord> NodeLike<T> for Vec<T> {
         T: Borrow<Q> + Ord,
         Q: Ord + ?Sized,
     {
-        match search(&self, value) {
+        match search(self, value) {
             Ok(idx) => Some((self.remove(idx), idx)),
             Err(_) => None,
         }
@@ -227,7 +233,8 @@ impl<T: Ord> NodeLike<T> for Vec<T> {
     }
     #[inline]
     fn iter<'a>(&'a self) -> std::slice::Iter<'a, T>
-    where T: 'a
+    where
+        T: 'a,
     {
         self.deref().iter()
     }
@@ -244,33 +251,98 @@ mod tests {
         assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Unbounded, true), None);
         assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Unbounded, false), None);
 
-        assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Included(&1), true), None);
-        assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Included(&5), true), Some(1));
-        assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Included(&9), true), Some(3));
-        assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Included(&0), true), None);
-        assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Included(&10), true), Some(4));
+        assert_eq!(
+            compute_positions_to_skip(&vec, std::ops::Bound::Included(&1), true),
+            None
+        );
+        assert_eq!(
+            compute_positions_to_skip(&vec, std::ops::Bound::Included(&5), true),
+            Some(1)
+        );
+        assert_eq!(
+            compute_positions_to_skip(&vec, std::ops::Bound::Included(&9), true),
+            Some(3)
+        );
+        assert_eq!(
+            compute_positions_to_skip(&vec, std::ops::Bound::Included(&0), true),
+            None
+        );
+        assert_eq!(
+            compute_positions_to_skip(&vec, std::ops::Bound::Included(&10), true),
+            Some(4)
+        );
 
-        assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Excluded(&1), true), Some(0));
-        assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Excluded(&5), true), Some(2));
-        assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Excluded(&9), true), Some(4));
-        assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Excluded(&0), true), None);
-        assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Excluded(&10), true), Some(4));
+        assert_eq!(
+            compute_positions_to_skip(&vec, std::ops::Bound::Excluded(&1), true),
+            Some(0)
+        );
+        assert_eq!(
+            compute_positions_to_skip(&vec, std::ops::Bound::Excluded(&5), true),
+            Some(2)
+        );
+        assert_eq!(
+            compute_positions_to_skip(&vec, std::ops::Bound::Excluded(&9), true),
+            Some(4)
+        );
+        assert_eq!(
+            compute_positions_to_skip(&vec, std::ops::Bound::Excluded(&0), true),
+            None
+        );
+        assert_eq!(
+            compute_positions_to_skip(&vec, std::ops::Bound::Excluded(&10), true),
+            Some(4)
+        );
 
-        assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Included(&1), false), Some(3));
-        assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Included(&5), false), Some(1));
-        assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Included(&9), false), None);
-        assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Included(&0), false), Some(4));
-        assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Included(&10), false), None);
+        assert_eq!(
+            compute_positions_to_skip(&vec, std::ops::Bound::Included(&1), false),
+            Some(3)
+        );
+        assert_eq!(
+            compute_positions_to_skip(&vec, std::ops::Bound::Included(&5), false),
+            Some(1)
+        );
+        assert_eq!(
+            compute_positions_to_skip(&vec, std::ops::Bound::Included(&9), false),
+            None
+        );
+        assert_eq!(
+            compute_positions_to_skip(&vec, std::ops::Bound::Included(&0), false),
+            Some(4)
+        );
+        assert_eq!(
+            compute_positions_to_skip(&vec, std::ops::Bound::Included(&10), false),
+            None
+        );
 
-        assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Excluded(&1), false), Some(4));
-        assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Excluded(&5), false), Some(2));
-        assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Excluded(&9), false), Some(0));
-        assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Excluded(&0), false), Some(4));
-        assert_eq!(compute_positions_to_skip(&vec, std::ops::Bound::Excluded(&10), false), None);
+        assert_eq!(
+            compute_positions_to_skip(&vec, std::ops::Bound::Excluded(&1), false),
+            Some(4)
+        );
+        assert_eq!(
+            compute_positions_to_skip(&vec, std::ops::Bound::Excluded(&5), false),
+            Some(2)
+        );
+        assert_eq!(
+            compute_positions_to_skip(&vec, std::ops::Bound::Excluded(&9), false),
+            Some(0)
+        );
+        assert_eq!(
+            compute_positions_to_skip(&vec, std::ops::Bound::Excluded(&0), false),
+            Some(4)
+        );
+        assert_eq!(
+            compute_positions_to_skip(&vec, std::ops::Bound::Excluded(&10), false),
+            None
+        );
 
         let empty: Vec<i32> = vec![];
-        assert_eq!(compute_positions_to_skip(&empty, std::ops::Bound::Included(&1), true), None);
-        assert_eq!(compute_positions_to_skip(&empty, std::ops::Bound::Excluded(&1), false), None);
+        assert_eq!(
+            compute_positions_to_skip(&empty, std::ops::Bound::Included(&1), true),
+            None
+        );
+        assert_eq!(
+            compute_positions_to_skip(&empty, std::ops::Bound::Excluded(&1), false),
+            None
+        );
     }
-
 }

@@ -132,6 +132,7 @@ where
         self.index.insert(node_id, Arc::new(Mutex::new(node)));
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn put_cdc_checked(
         &self,
         value: T,
@@ -139,8 +140,7 @@ where
         loop {
             let mut cdc = vec![];
             let _global_guard = self.index_lock.read();
-            let target_node_entry = match self.index.lower_bound(std::ops::Bound::Included(&value))
-            {
+            let target_node_entry = match self.index.lower_bound(std::ops::Bound::Included(&value)) {
                 Some(entry) => entry,
                 None => {
                     if let Some(last) = self.index.back() {
@@ -153,7 +153,7 @@ where
                         let first_node = Arc::new(Mutex::new(first_node));
 
                         drop(_global_guard);
-                        if let Ok(_write_guard) = self.index_lock.try_write() {
+                        if self.index_lock.try_write().is_ok() {
                             #[cfg(feature = "cdc")]
                             {
                                 let node_insertion = ChangeEvent::CreateNode {
@@ -200,11 +200,8 @@ where
                         return Ok((None, cdc));
                     }
 
-                    if old_max.is_some() {
-                        operation = Some(Operation::UpdateMax(
-                            target_node_entry.value().clone(),
-                            old_max.unwrap(),
-                        ))
+                    if let Some(old_max) = old_max {
+                        operation = Some(Operation::UpdateMax(target_node_entry.value().clone(), old_max))
                     } else {
                         return Ok((None, cdc));
                     }
@@ -231,8 +228,7 @@ where
                         #[cfg(feature = "cdc")]
                         {
                             for unassigned_event in value_cdc {
-                                let event_id =
-                                    self.event_id.fetch_add(1, Ordering::AcqRel).into();
+                                let event_id = self.event_id.fetch_add(1, Ordering::AcqRel).into();
                                 cdc.push(unassigned_event.assign_id(event_id));
                             }
                         }
@@ -246,8 +242,7 @@ where
                         #[cfg(feature = "cdc")]
                         {
                             for unassigned_event in value_cdc {
-                                let event_id =
-                                    self.event_id.fetch_add(1, Ordering::AcqRel).into();
+                                let event_id = self.event_id.fetch_add(1, Ordering::AcqRel).into();
                                 cdc.push(unassigned_event.assign_id(event_id));
                             }
                         }
@@ -362,71 +357,63 @@ where
         T: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        loop {
-            let mut cdc = vec![];
-            let _global_guard = self.index_lock.read();
-            if let Some(target_node_entry) =
-                self.index.lower_bound(Bound::Included(&value))
-            {
-                let mut node_guard = target_node_entry.value().lock_arc();
-                let old_max = node_guard.max().cloned();
-                let deleted = NodeLike::delete(&mut *node_guard, value);
-                if deleted.is_none() {
-                    return (None, cdc);
-                }
-                let (deleted, idx) = deleted.expect("should be ok as checked before");
-
-                let operation = if node_guard.len() > 0 {
-                    #[cfg(feature = "cdc")]
-                    {
-                        let node_element_removal = ChangeEvent::RemoveAt {
-                            // is correct as node is locked and current thread is the only that can
-                            // fetch event_id, so events for this node will have monotonic id's.
-                            event_id: self.event_id.fetch_add(1, Ordering::AcqRel).into(),
-                            max_value: old_max
-                                .clone()
-                                .expect("Max value should exist as Node is not empty"),
-                            value: deleted.clone(),
-                            index: idx,
-                        };
-                        cdc.push(node_element_removal);
-                    }
-
-                    if old_max.as_ref() == node_guard.max() {
-                        return (Some(deleted), cdc);
-                    }
-
-                    Some(Operation::UpdateMax(
-                        target_node_entry.value().clone(),
-                        old_max.unwrap(),
-                    ))
-                } else {
-                    Some(Operation::MakeUnreachable(
-                        target_node_entry.value().clone(),
-                        old_max.unwrap(),
-                    ))
-                };
-
-                drop(node_guard);
-                drop(_global_guard);
-
-                let _global_guard = self.index_lock.write();
-
-                return if let Ok((_, value_cdc)) = operation.unwrap().commit(&self.index) {
-                    #[cfg(feature = "cdc")]
-                    {
-                        for unassigned_event in value_cdc {
-                            let event_id = self.event_id.fetch_add(1, Ordering::AcqRel).into();
-                            cdc.push(unassigned_event.assign_id(event_id));
-                        }
-                    }
-                    (Some(deleted), cdc)
-                } else {
-                    (Some(deleted), cdc)
-                };
+        let mut cdc = vec![];
+        let _global_guard = self.index_lock.read();
+        if let Some(target_node_entry) = self.index.lower_bound(std::ops::Bound::Included(value)) {
+            let mut node_guard = target_node_entry.value().lock_arc();
+            let old_max = node_guard.max().cloned();
+            let deleted = NodeLike::delete(&mut *node_guard, value);
+            if deleted.is_none() {
+                return (None, cdc);
             }
+            let (deleted, idx) = deleted.expect("should be ok as checked before");
 
-            break;
+            let operation = if node_guard.len() > 0 {
+                #[cfg(feature = "cdc")]
+                {
+                    let node_element_removal = ChangeEvent::RemoveAt {
+                        // is correct as node is locked and current thread is the only that can
+                        // fetch event_id, so events for this node will have monotonic id's.
+                        event_id: self.event_id.fetch_add(1, Ordering::Relaxed).into(),
+                        max_value: old_max.clone().expect("Max value should exist as Node is not empty"),
+                        value: deleted.clone(),
+                        index: idx,
+                    };
+                    cdc.push(node_element_removal);
+                }
+
+                if old_max.as_ref() == node_guard.max() {
+                    return (Some(deleted), cdc);
+                }
+
+                Some(Operation::UpdateMax(
+                    target_node_entry.value().clone(),
+                    old_max.unwrap(),
+                ))
+            } else {
+                Some(Operation::MakeUnreachable(
+                    target_node_entry.value().clone(),
+                    old_max.unwrap(),
+                ))
+            };
+
+            drop(node_guard);
+            drop(_global_guard);
+
+            let _global_guard = self.index_lock.write();
+
+            return if let Ok((_, value_cdc)) = operation.unwrap().commit(&self.index) {
+                #[cfg(feature = "cdc")]
+                {
+                    for unassigned_event in value_cdc {
+                        let event_id = self.event_id.fetch_add(1, Ordering::AcqRel).into();
+                        cdc.push(unassigned_event.assign_id(event_id));
+                    }
+                }
+                (Some(deleted), cdc)
+            } else {
+                (Some(deleted), cdc)
+            };
         }
 
         (None, vec![])
@@ -462,7 +449,7 @@ where
         Q: Ord + ?Sized,
     {
         let _global_guard = self.index_lock.read();
-        match self.index.lower_bound(std::ops::Bound::Included(&value)) {
+        match self.index.lower_bound(std::ops::Bound::Included(value)) {
             Some(entry) => Some(entry.value().clone()),
             None => self
                 .index
@@ -518,10 +505,10 @@ where
         None
     }
     pub fn len(&self) -> usize {
-        self.index
-            .iter()
-            .map(|node| node.value().lock().len())
-            .sum()
+        self.index.iter().map(|node| node.value().lock().len()).sum()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
     pub fn capacity(&self) -> usize {
         self.index
@@ -639,7 +626,7 @@ where
                                 .lock_arc(),
                         );
                         self.current_front_node_iter = Some(unsafe {
-                            std::mem::transmute(
+                            std::mem::transmute::<std::slice::Iter<'_, T>, std::slice::Iter<'a, T>>(
                                 self.current_front_node_guard
                                     .as_ref()
                                     .expect("was just set before")
@@ -675,9 +662,7 @@ where
                     if let Some(current_node_entry) = self.tree.index.iter().find(|e| {
                         Arc::ptr_eq(
                             e.value(),
-                            self.current_front_node
-                                .as_ref()
-                                .expect("was just set before"),
+                            self.current_front_node.as_ref().expect("was just set before"),
                         )
                     }) {
                         if let Some(next_node_entry) = current_node_entry.next() {
@@ -685,10 +670,8 @@ where
 
                             if let Some(back_entry) = self.current_back_node.as_ref() {
                                 if Arc::ptr_eq(next_node_entry.value(), back_entry) {
-                                    self.current_front_node_guard =
-                                        self.current_back_node_guard.take();
-                                    self.current_front_node_iter =
-                                        self.current_back_node_iter.take();
+                                    self.current_front_node_guard = self.current_back_node_guard.take();
+                                    self.current_front_node_iter = self.current_back_node_iter.take();
                                 }
                                 continue;
                             }
@@ -700,7 +683,7 @@ where
                                     .lock_arc(),
                             );
                             self.current_front_node_iter = Some(unsafe {
-                                std::mem::transmute(
+                                std::mem::transmute::<std::slice::Iter<'_, T>, std::slice::Iter<'a, T>>(
                                     self.current_front_node_guard
                                         .as_ref()
                                         .expect("was just set before")
@@ -729,7 +712,7 @@ where
                         .lock_arc(),
                 );
                 self.current_front_node_iter = Some(unsafe {
-                    std::mem::transmute(
+                    std::mem::transmute::<std::slice::Iter<'_, T>, std::slice::Iter<'a, T>>(
                         self.current_front_node_guard
                             .as_ref()
                             .expect("was just set before")
@@ -738,15 +721,9 @@ where
                 });
 
                 if let Some(current_front_value) = self.current_front_value.as_ref() {
-                    let g = self
-                        .current_front_node_guard
-                        .as_mut()
-                        .expect("was just set before");
+                    let g = self.current_front_node_guard.as_mut().expect("was just set before");
                     if let Some(rank) = g.rank(Bound::Excluded(current_front_value), true) {
-                        let i = self
-                            .current_front_node_iter
-                            .as_mut()
-                            .expect("was just set before");
+                        let i = self.current_front_node_iter.as_mut().expect("was just set before");
                         if let Some(v) = i.nth(rank + 1) {
                             if let Some(current_back_value) = self.current_back_value.as_ref() {
                                 if v.ge(current_back_value) {
@@ -790,14 +767,10 @@ where
                             continue;
                         }
 
-                        self.current_back_node_guard = Some(
-                            self.current_back_node
-                                .as_ref()
-                                .expect("was just set before")
-                                .lock_arc(),
-                        );
+                        self.current_back_node_guard =
+                            Some(self.current_back_node.as_ref().expect("was just set before").lock_arc());
                         self.current_back_node_iter = Some(unsafe {
-                            std::mem::transmute(
+                            std::mem::transmute::<std::slice::Iter<'_, T>, std::slice::Iter<'a, T>>(
                                 self.current_back_node_guard
                                     .as_ref()
                                     .expect("was just set before")
@@ -830,35 +803,26 @@ where
                     self.current_back_node_iter = None;
                     self.current_back_node_guard = None;
 
-                    if let Some(current_node_entry) = self.tree.index.iter().find(|e| {
-                        Arc::ptr_eq(
-                            e.value(),
-                            self.current_back_node
-                                .as_ref()
-                                .expect("was just set before"),
-                        )
-                    }) {
+                    if let Some(current_node_entry) =
+                        self.tree.index.iter().find(|e| {
+                            Arc::ptr_eq(e.value(), self.current_back_node.as_ref().expect("was just set before"))
+                        })
+                    {
                         if let Some(prev_node_entry) = current_node_entry.prev() {
                             self.current_back_node = Some(prev_node_entry.value().clone());
 
                             if let Some(front_entry) = self.current_front_node.as_ref() {
                                 if Arc::ptr_eq(prev_node_entry.value(), front_entry) {
-                                    self.current_back_node_guard =
-                                        self.current_front_node_guard.take();
-                                    self.current_back_node_iter =
-                                        self.current_front_node_iter.take();
+                                    self.current_back_node_guard = self.current_front_node_guard.take();
+                                    self.current_back_node_iter = self.current_front_node_iter.take();
                                 }
                                 continue;
                             }
 
-                            self.current_back_node_guard = Some(
-                                self.current_back_node
-                                    .as_ref()
-                                    .expect("was just set before")
-                                    .lock_arc(),
-                            );
+                            self.current_back_node_guard =
+                                Some(self.current_back_node.as_ref().expect("was just set before").lock_arc());
                             self.current_back_node_iter = Some(unsafe {
-                                std::mem::transmute(
+                                std::mem::transmute::<std::slice::Iter<'_, T>, std::slice::Iter<'a, T>>(
                                     self.current_back_node_guard
                                         .as_ref()
                                         .expect("was just set before")
@@ -880,14 +844,10 @@ where
                     }
                 }
             } else {
-                self.current_back_node_guard = Some(
-                    self.current_back_node
-                        .as_ref()
-                        .expect("was just set before")
-                        .lock_arc(),
-                );
+                self.current_back_node_guard =
+                    Some(self.current_back_node.as_ref().expect("was just set before").lock_arc());
                 self.current_back_node_iter = Some(unsafe {
-                    std::mem::transmute(
+                    std::mem::transmute::<std::slice::Iter<'_, T>, std::slice::Iter<'a, T>>(
                         self.current_back_node_guard
                             .as_ref()
                             .expect("was just set before")
@@ -896,15 +856,9 @@ where
                 });
 
                 if let Some(current_back_value) = self.current_back_value.as_ref() {
-                    let g = self
-                        .current_back_node_guard
-                        .as_mut()
-                        .expect("was just set before");
+                    let g = self.current_back_node_guard.as_mut().expect("was just set before");
                     if let Some(rank) = g.rank(Bound::Excluded(current_back_value), false) {
-                        let i = self
-                            .current_back_node_iter
-                            .as_mut()
-                            .expect("was just set before");
+                        let i = self.current_back_node_iter.as_mut().expect("was just set before");
                         if let Some(v) = i.nth_back(rank + 1) {
                             if let Some(current_front_value) = self.current_front_value.as_ref() {
                                 if v.le(current_front_value) {
@@ -924,10 +878,7 @@ where
     }
 }
 
-impl<'a, T: Debug + Ord + Clone + Send, Node: NodeLike<T> + Send + 'static> FusedIterator
-    for Iter<'a, T, Node>
-{
-}
+impl<'a, T: Debug + Ord + Clone + Send, Node: NodeLike<T> + Send + 'static> FusedIterator for Iter<'a, T, Node> {}
 
 impl<'a, T, Node> IntoIterator for &'a BTreeSet<T, Node>
 where
@@ -981,16 +932,14 @@ where
                 drop(front_guard);
 
                 front_value
-            } else {
-                if let Some(pre_front_entry) = front_entry.prev() {
-                    let pre_front_guard = pre_front_entry.value().lock_arc();
-                    let front_value = pre_front_guard.iter().last().cloned();
-                    drop(pre_front_guard);
+            } else if let Some(pre_front_entry) = front_entry.prev() {
+                let pre_front_guard = pre_front_entry.value().lock_arc();
+                let front_value = pre_front_guard.iter().last().cloned();
+                drop(pre_front_guard);
 
-                    front_value
-                } else {
-                    None
-                }
+                front_value
+            } else {
+                None
             }
         } else {
             None
@@ -1015,16 +964,14 @@ where
                 drop(back_guard);
 
                 back_value
-            } else {
-                if let Some(prev_back_entry) = back_entry.next() {
-                    let prev_back_guard = prev_back_entry.value().lock_arc();
-                    let back_value = prev_back_guard.iter().next().cloned();
-                    drop(prev_back_guard);
+            } else if let Some(prev_back_entry) = back_entry.next() {
+                let prev_back_guard = prev_back_entry.value().lock_arc();
+                let back_value = prev_back_guard.iter().next().cloned();
+                drop(prev_back_guard);
 
-                    back_value
-                } else {
-                    None
-                }
+                back_value
+            } else {
+                None
             }
         } else {
             None
@@ -1033,11 +980,7 @@ where
         if front_value.is_none() && back_value.is_none() {
             // in this case we iter full or no iter at all
             if start_bound != Bound::Unbounded || end_bound != Bound::Unbounded {
-                if let Some(max) = btree
-                    .index
-                    .back()
-                    .and_then(|e| e.value().lock_arc().max().cloned())
-                {
+                if let Some(max) = btree.index.back().and_then(|e| e.value().lock_arc().max().cloned()) {
                     if let Bound::Included(v) = start_bound {
                         if v > max.borrow() {
                             met = true;
@@ -1049,11 +992,7 @@ where
                     }
                 }
 
-                if let Some(min) = btree
-                    .index
-                    .front()
-                    .and_then(|e| e.value().lock_arc().min().cloned())
-                {
+                if let Some(min) = btree.index.front().and_then(|e| e.value().lock_arc().min().cloned()) {
                     if let Bound::Included(v) = end_bound {
                         if v < min.borrow() {
                             met = true;
@@ -1233,16 +1172,14 @@ where
                         }
 
                         guard = Some(new_guard);
-                    } else {
-                        if let Some((len, position)) = potential_front_entry_guard
-                            .as_ref()
-                            .and_then(|g| Some((g.len(), g.rank(end_bound, true))))
-                        {
-                            if let Some(position) = position {
-                                back_position = position;
-                            } else {
-                                back_position = len;
-                            }
+                    } else if let Some((len, position)) = potential_front_entry_guard
+                        .as_ref()
+                        .map(|g| (g.len(), g.rank(end_bound, true)))
+                    {
+                        if let Some(position) = position {
+                            back_position = position;
+                        } else {
+                            back_position = len;
                         }
                     }
                 }
@@ -1256,7 +1193,7 @@ where
         if let Some(mut front_entry_guard) = potential_front_entry_guard {
             let front_entry = potential_front_entry.unwrap();
             // But no back entry
-            if let None = potential_back_entry_guard {
+            if potential_back_entry_guard.is_none() {
                 // Then we drain the front entry
                 let adjusted_back_position = {
                     if potential_front_position > potential_back_position {
@@ -1277,21 +1214,15 @@ where
                 // Otherwise we insert it again with a new max
                 let new_max = front_entry_guard.last().unwrap().clone();
                 self.index.insert(new_max, old_entry_value);
-
-                return;
             } else if let Some(mut back_entry_guard) = potential_back_entry_guard {
                 let back_entry = potential_back_entry.unwrap();
                 // Otherwise we remove every single node between them
-                loop {
-                    if let Some(next_entry) = front_entry.next() {
-                        if next_entry.key().eq(back_entry.key()) {
-                            break;
-                        }
-
-                        next_entry.remove();
-                    } else {
+                while let Some(next_entry) = front_entry.next() {
+                    if next_entry.key().eq(back_entry.key()) {
                         break;
                     }
+
+                    next_entry.remove();
                 }
 
                 // And then trim the front from the left
@@ -1299,8 +1230,7 @@ where
                 front_entry_guard.drain(potential_front_position..);
                 if !front_entry_guard.is_empty() {
                     let new_front_max = front_entry_guard.last().unwrap().clone();
-                    self.index
-                        .insert(new_front_max, front_entry.value().clone());
+                    self.index.insert(new_front_max, front_entry.value().clone());
                 }
 
                 // The back from the right
@@ -1312,7 +1242,6 @@ where
                 }
 
                 // And that's it
-                return;
             }
         }
     }
@@ -1462,12 +1391,7 @@ mod tests {
 
             let expected_next_back = 20 - i;
             let actual_next_back = iter.next_back();
-            assert_eq!(
-                actual_next_back,
-                Some(&expected_next_back),
-                "Tree: {:?}",
-                tree
-            );
+            assert_eq!(actual_next_back, Some(&expected_next_back), "Tree: {:?}", tree);
         }
         assert_eq!(iter.next(), None);
         assert_eq!(iter.next_back(), None);
@@ -1498,12 +1422,7 @@ mod tests {
         let btree: BTreeSet<usize> = BTreeSet::from_iter(0..10);
         assert_eq!(btree.range((Included(5), Included(10))).count(), 5);
         assert_eq!(btree.range((Included(5), Included(11))).count(), 5);
-        assert_eq!(
-            btree
-                .range((Included(5), Included(10 + DEFAULT_INNER_SIZE)))
-                .count(),
-            5
-        );
+        assert_eq!(btree.range((Included(5), Included(10 + DEFAULT_INNER_SIZE))).count(), 5);
         assert_eq!(btree.range((Included(0), Included(11))).count(), 10);
     }
 
@@ -1530,10 +1449,7 @@ mod tests {
             btree.range(0..=DEFAULT_INNER_SIZE + 1).count(),
             (0..=DEFAULT_INNER_SIZE + 1).count()
         );
-        assert_eq!(
-            btree.iter().rev().count(),
-            (0..(DEFAULT_INNER_SIZE + 10)).count()
-        );
+        assert_eq!(btree.iter().rev().count(), (0..(DEFAULT_INNER_SIZE + 10)).count());
         assert_eq!(
             btree.range(0..DEFAULT_INNER_SIZE).rev().count(),
             (0..DEFAULT_INNER_SIZE).count()
@@ -1565,12 +1481,7 @@ mod tests {
         assert_eq!(btree.range(..1).rev().count(), 0);
 
         assert_eq!(btree.range(..DEFAULT_INNER_SIZE).count(), 0);
-        assert_eq!(
-            btree
-                .range(DEFAULT_INNER_SIZE..DEFAULT_INNER_SIZE * 2)
-                .count(),
-            0
-        );
+        assert_eq!(btree.range(DEFAULT_INNER_SIZE..DEFAULT_INNER_SIZE * 2).count(), 0);
     }
 
     #[test]
@@ -1684,11 +1595,7 @@ mod tests {
         for i in 0..NUM_ELEMENTS {
             set.insert(i);
         }
-        assert_eq!(
-            set.len(),
-            NUM_ELEMENTS as usize,
-            "Incorrect size after insertion"
-        );
+        assert_eq!(set.len(), NUM_ELEMENTS as usize, "Incorrect size after insertion");
 
         let num_threads = 8;
         let elements_per_thread = NUM_ELEMENTS / num_threads;
@@ -1709,21 +1616,13 @@ mod tests {
             handle.join().unwrap();
         }
 
-        assert_eq!(
-            set.len(),
-            NUM_ELEMENTS as usize / 2,
-            "Incorrect size after removal"
-        );
+        assert_eq!(set.len(), NUM_ELEMENTS as usize / 2, "Incorrect size after removal");
 
         for i in 0..NUM_ELEMENTS {
             if i % 2 == 0 {
                 assert!(set.contains(&i), "Even number {} should be in the set", i);
             } else {
-                assert!(
-                    !set.contains(&i),
-                    "Odd number {} should not be in the set",
-                    i
-                );
+                assert!(!set.contains(&i), "Odd number {} should not be in the set", i);
             }
         }
     }
@@ -1776,10 +1675,7 @@ mod tests {
         assert_eq!(set.range(5..=8).collect::<Vec<_>>(), vec![&5, &6, &7, &8]);
         assert_eq!(set.range(5..8).collect::<Vec<_>>(), vec![&5, &6, &7]);
 
-        assert_eq!(
-            set.range(10..=13).collect::<Vec<_>>(),
-            vec![&10, &11, &12, &13]
-        );
+        assert_eq!(set.range(10..=13).collect::<Vec<_>>(), vec![&10, &11, &12, &13]);
         assert_eq!(set.range(10..13).collect::<Vec<_>>(), vec![&10, &11, &12]);
 
         // Last value of the node
@@ -1803,23 +1699,11 @@ mod tests {
         assert_eq!(set.range(2..5).collect::<Vec<_>>(), vec![&2, &3, &4]);
 
         // Full node
-        assert_eq!(
-            set.range(0..=4).collect::<Vec<_>>(),
-            vec![&0, &1, &2, &3, &4]
-        );
-        assert_eq!(
-            set.range(0..5).collect::<Vec<_>>(),
-            vec![&0, &1, &2, &3, &4]
-        );
+        assert_eq!(set.range(0..=4).collect::<Vec<_>>(), vec![&0, &1, &2, &3, &4]);
+        assert_eq!(set.range(0..5).collect::<Vec<_>>(), vec![&0, &1, &2, &3, &4]);
 
-        assert_eq!(
-            set.range(5..=9).collect::<Vec<_>>(),
-            vec![&5, &6, &7, &8, &9]
-        );
-        assert_eq!(
-            set.range(5..10).collect::<Vec<_>>(),
-            vec![&5, &6, &7, &8, &9]
-        );
+        assert_eq!(set.range(5..=9).collect::<Vec<_>>(), vec![&5, &6, &7, &8, &9]);
+        assert_eq!(set.range(5..10).collect::<Vec<_>>(), vec![&5, &6, &7, &8, &9]);
 
         assert_eq!(
             set.range(10..=19).collect::<Vec<_>>(),
@@ -1834,10 +1718,7 @@ mod tests {
         assert_eq!(set.range(3..=6).collect::<Vec<_>>(), vec![&3, &4, &5, &6]);
         assert_eq!(set.range(3..7).collect::<Vec<_>>(), vec![&3, &4, &5, &6]);
 
-        assert_eq!(
-            set.range(8..=11).collect::<Vec<_>>(),
-            vec![&8, &9, &10, &11]
-        );
+        assert_eq!(set.range(8..=11).collect::<Vec<_>>(), vec![&8, &9, &10, &11]);
         assert_eq!(set.range(8..12).collect::<Vec<_>>(), vec![&8, &9, &10, &11]);
 
         // REVERSED
@@ -1853,26 +1734,14 @@ mod tests {
         assert_eq!(set.range(10..11).rev().collect::<Vec<_>>(), vec![&10]);
 
         // From first value to middle
-        assert_eq!(
-            set.range(0..=3).rev().collect::<Vec<_>>(),
-            vec![&3, &2, &1, &0]
-        );
+        assert_eq!(set.range(0..=3).rev().collect::<Vec<_>>(), vec![&3, &2, &1, &0]);
         assert_eq!(set.range(0..3).rev().collect::<Vec<_>>(), vec![&2, &1, &0]);
 
-        assert_eq!(
-            set.range(5..=8).rev().collect::<Vec<_>>(),
-            vec![&8, &7, &6, &5]
-        );
+        assert_eq!(set.range(5..=8).rev().collect::<Vec<_>>(), vec![&8, &7, &6, &5]);
         assert_eq!(set.range(5..8).rev().collect::<Vec<_>>(), vec![&7, &6, &5]);
 
-        assert_eq!(
-            set.range(10..=13).rev().collect::<Vec<_>>(),
-            vec![&13, &12, &11, &10]
-        );
-        assert_eq!(
-            set.range(10..13).rev().collect::<Vec<_>>(),
-            vec![&12, &11, &10]
-        );
+        assert_eq!(set.range(10..=13).rev().collect::<Vec<_>>(), vec![&13, &12, &11, &10]);
+        assert_eq!(set.range(10..13).rev().collect::<Vec<_>>(), vec![&12, &11, &10]);
 
         // Last value of the node
         assert_eq!(set.range(4..=4).rev().collect::<Vec<_>>(), vec![&4]);
@@ -1885,14 +1754,8 @@ mod tests {
         assert_eq!(set.range(19..20).rev().collect::<Vec<_>>(), vec![&19]);
 
         // From middle to last value of the node
-        assert_eq!(
-            set.range(17..=19).rev().collect::<Vec<_>>(),
-            vec![&19, &18, &17]
-        );
-        assert_eq!(
-            set.range(17..20).rev().collect::<Vec<_>>(),
-            vec![&19, &18, &17]
-        );
+        assert_eq!(set.range(17..=19).rev().collect::<Vec<_>>(), vec![&19, &18, &17]);
+        assert_eq!(set.range(17..20).rev().collect::<Vec<_>>(), vec![&19, &18, &17]);
 
         assert_eq!(set.range(7..=9).rev().collect::<Vec<_>>(), vec![&9, &8, &7]);
         assert_eq!(set.range(7..10).rev().collect::<Vec<_>>(), vec![&9, &8, &7]);
@@ -1901,23 +1764,11 @@ mod tests {
         assert_eq!(set.range(2..5).rev().collect::<Vec<_>>(), vec![&4, &3, &2]);
 
         // Full node
-        assert_eq!(
-            set.range(0..=4).rev().collect::<Vec<_>>(),
-            vec![&4, &3, &2, &1, &0]
-        );
-        assert_eq!(
-            set.range(0..5).rev().collect::<Vec<_>>(),
-            vec![&4, &3, &2, &1, &0]
-        );
+        assert_eq!(set.range(0..=4).rev().collect::<Vec<_>>(), vec![&4, &3, &2, &1, &0]);
+        assert_eq!(set.range(0..5).rev().collect::<Vec<_>>(), vec![&4, &3, &2, &1, &0]);
 
-        assert_eq!(
-            set.range(5..=9).rev().collect::<Vec<_>>(),
-            vec![&9, &8, &7, &6, &5]
-        );
-        assert_eq!(
-            set.range(5..10).rev().collect::<Vec<_>>(),
-            vec![&9, &8, &7, &6, &5]
-        );
+        assert_eq!(set.range(5..=9).rev().collect::<Vec<_>>(), vec![&9, &8, &7, &6, &5]);
+        assert_eq!(set.range(5..10).rev().collect::<Vec<_>>(), vec![&9, &8, &7, &6, &5]);
 
         assert_eq!(
             set.range(10..=19).rev().collect::<Vec<_>>(),
@@ -1929,23 +1780,11 @@ mod tests {
         );
 
         // Node intersection
-        assert_eq!(
-            set.range(3..=6).rev().collect::<Vec<_>>(),
-            vec![&6, &5, &4, &3]
-        );
-        assert_eq!(
-            set.range(3..7).rev().collect::<Vec<_>>(),
-            vec![&6, &5, &4, &3]
-        );
+        assert_eq!(set.range(3..=6).rev().collect::<Vec<_>>(), vec![&6, &5, &4, &3]);
+        assert_eq!(set.range(3..7).rev().collect::<Vec<_>>(), vec![&6, &5, &4, &3]);
 
-        assert_eq!(
-            set.range(8..=11).rev().collect::<Vec<_>>(),
-            vec![&11, &10, &9, &8]
-        );
-        assert_eq!(
-            set.range(8..12).rev().collect::<Vec<_>>(),
-            vec![&11, &10, &9, &8]
-        );
+        assert_eq!(set.range(8..=11).rev().collect::<Vec<_>>(), vec![&11, &10, &9, &8]);
+        assert_eq!(set.range(8..12).rev().collect::<Vec<_>>(), vec![&11, &10, &9, &8]);
 
         // Non-existent range
         assert!(set.range(20..).collect::<Vec<_>>().is_empty());

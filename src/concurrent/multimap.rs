@@ -149,7 +149,7 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(raw_entry) = self.inner.next() {
-            return Some((&raw_entry.0, &raw_entry.2));
+            return Some((raw_entry.0, raw_entry.2));
         }
 
         None
@@ -164,7 +164,7 @@ where
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         if let Some(raw_entry) = self.inner.next_back() {
-            return Some((&raw_entry.0, &raw_entry.2));
+            return Some((raw_entry.0, raw_entry.2));
         }
 
         None
@@ -319,10 +319,7 @@ where
     pub fn insert(&self, key: K, value: V) -> Option<V> {
         let new_entry = MultiPair::new(key, value);
 
-        self.set
-            .put_cdc(new_entry)
-            .0
-            .and_then(|pair| Some(pair.value))
+        self.set.put_cdc(new_entry).0.map(|pair| pair.value)
     }
     /// Inserts a key-value pair into the map and returns old value (if it was
     /// already in set) with [`ChangeEvent`]'s that describes this insert
@@ -333,7 +330,7 @@ where
 
         let (old_value, cdc) = self.set.put_cdc(new_entry);
 
-        (old_value.and_then(|pair| Some(pair.value)), cdc)
+        (old_value.map(|pair| pair.value), cdc)
     }
     /// Removes some key from the map that matches the given key, returning the
     /// key and the value if the key was previously in the map.
@@ -364,14 +361,13 @@ where
         MultiPair<K, V>: Borrow<Q> + Ord,
         Q: Ord + ?Sized,
     {
-        self.set
-            .remove(key)
-            .and_then(|pair| Some((pair.key, pair.value)))
+        self.set.remove(key).map(|pair| (pair.key, pair.value))
     }
     /// Removes some key from the map that matches the given key, returning the
     /// key and the value if the key was previously in the map with
     /// [`ChangeEvent`]'s describing this `remove_some` action.
     #[cfg(feature = "cdc")]
+    #[allow(clippy::type_complexity)]
     pub fn remove_some_cdc<Q>(&self, key: &Q) -> (Option<(K, V)>, Vec<ChangeEvent<MultiPair<K, V>>>)
     where
         MultiPair<K, V>: Borrow<Q> + Ord,
@@ -379,7 +375,7 @@ where
     {
         let (old_value, cdc) = self.set.remove_cdc(key);
 
-        (old_value.and_then(|pair| Some((pair.key, pair.value))), cdc)
+        (old_value.map(|pair| (pair.key, pair.value)), cdc)
     }
     /// Removes a specific key-value pair from the map returning the key and the value if the key
     /// was previously in the map.
@@ -399,7 +395,7 @@ where
     /// assert_eq!(map.remove(&1, &"b"), Some((1, "b")));
     /// ```
     pub fn remove(&self, key: &K, value: &V) -> Option<(K, V)> {
-        let discriminant_to_remove = self.raw_get(&key).find(|pair| pair.2 == value);
+        let discriminant_to_remove = self.raw_get(key).find(|pair| pair.2 == value);
         if let Some(discriminant_to_remove) = discriminant_to_remove {
             let pair_to_remove = MultiPair {
                 key: discriminant_to_remove.0.clone(),
@@ -407,10 +403,7 @@ where
                 discriminator: *discriminant_to_remove.1,
             };
 
-            return self
-                .set
-                .remove(&pair_to_remove)
-                .and_then(|pair| Some((pair.key, pair.value)));
+            return self.set.remove(&pair_to_remove).map(|pair| (pair.key, pair.value));
         }
 
         None
@@ -419,12 +412,9 @@ where
     /// value if the key was previously in the map with [`ChangeEvent`]'s
     /// describing this `remove_some` action.
     #[cfg(feature = "cdc")]
-    pub fn remove_cdc(
-        &self,
-        key: &K,
-        value: &V,
-    ) -> (Option<(K, V)>, Vec<ChangeEvent<MultiPair<K, V>>>) {
-        let discriminant_to_remove = self.raw_get(&key).find(|pair| pair.2 == value);
+    #[allow(clippy::type_complexity)]
+    pub fn remove_cdc(&self, key: &K, value: &V) -> (Option<(K, V)>, Vec<ChangeEvent<MultiPair<K, V>>>) {
+        let discriminant_to_remove = self.raw_get(key).find(|pair| pair.2 == value);
         if let Some(discriminant_to_remove) = discriminant_to_remove {
             let pair_to_remove = MultiPair {
                 key: discriminant_to_remove.0.clone(),
@@ -454,6 +444,23 @@ where
     /// ```
     pub fn len(&self) -> usize {
         self.set.len()
+    }
+    /// Returns `true` if the multimap contains no elements.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// use indexset::concurrent::multimap::BTreeMultiMap;
+    ///
+    /// let mut a = BTreeMultiMap::<usize, &str>::new();
+    /// assert!(a.is_empty());
+    /// a.insert(1, "a");
+    /// assert!(!a.is_empty());
+    /// ```
+    pub fn is_empty(&self) -> bool {
+        self.set.is_empty()
     }
     /// Returns the total number of allocated slots across all internal nodes.
     ///
@@ -520,9 +527,7 @@ where
     /// assert_eq!((*first_key, *first_value), (1, "a"));
     /// ```
     pub fn iter(&self) -> Iter<'_, K, V, Node> {
-        Iter {
-            inner: self.set.iter(),
-        }
+        Iter { inner: self.set.iter() }
     }
     /// Constructs a double-ended iterator over a sub-range of elements in the map.
     /// The simplest way is to use the range syntax `min..max`, thus `range(min..max)` will
@@ -559,22 +564,14 @@ where
     {
         let start_bound = range.start_bound();
         let adjusted_start_bound = match start_bound {
-            std::ops::Bound::Included(start) => {
-                std::ops::Bound::Included(MultiPair::with_infimum(start.clone()))
-            }
-            std::ops::Bound::Excluded(start) => {
-                std::ops::Bound::Excluded(MultiPair::with_supremum(start.clone()))
-            }
+            std::ops::Bound::Included(start) => std::ops::Bound::Included(MultiPair::with_infimum(start.clone())),
+            std::ops::Bound::Excluded(start) => std::ops::Bound::Excluded(MultiPair::with_supremum(start.clone())),
             _ => std::ops::Bound::Unbounded,
         };
         let end_bound = range.end_bound();
         let adjusted_end_bound = match end_bound {
-            std::ops::Bound::Included(end) => {
-                std::ops::Bound::Included(MultiPair::with_supremum(end.clone()))
-            }
-            std::ops::Bound::Excluded(end) => {
-                std::ops::Bound::Excluded(MultiPair::with_infimum(end.clone()))
-            }
+            std::ops::Bound::Included(end) => std::ops::Bound::Included(MultiPair::with_supremum(end.clone())),
+            std::ops::Bound::Excluded(end) => std::ops::Bound::Excluded(MultiPair::with_infimum(end.clone())),
             _ => std::ops::Bound::Unbounded,
         };
 
@@ -651,9 +648,7 @@ mod tests {
         let mid_range = map.range(2..3).collect::<BTreeSet<_>>();
         assert_eq!(
             mid_range,
-            vec![(&2, &"c"), (&2, &"d"),]
-                .into_iter()
-                .collect::<BTreeSet<_>>()
+            vec![(&2, &"c"), (&2, &"d"),].into_iter().collect::<BTreeSet<_>>()
         );
     }
 
@@ -677,9 +672,7 @@ mod tests {
         let mid_range = map.range(2..3).collect::<BTreeSet<_>>();
         assert_eq!(
             mid_range,
-            vec![(&2, &"c"), (&2, &"d"),]
-                .into_iter()
-                .collect::<BTreeSet<_>>()
+            vec![(&2, &"c"), (&2, &"d"),].into_iter().collect::<BTreeSet<_>>()
         );
 
         let reverse_range = map.range(1..4).rev().collect::<BTreeSet<_>>();
@@ -711,31 +704,22 @@ mod tests {
 
         assert_eq!(
             range,
-            vec![(&1, &"b"), (&1, &"a"),]
-                .into_iter()
-                .collect::<BTreeSet<_>>()
+            vec![(&1, &"b"), (&1, &"a"),].into_iter().collect::<BTreeSet<_>>()
         );
 
         let range = map.get(&2).collect::<BTreeSet<_>>();
         assert_eq!(
             range,
-            vec![(&2, &"d"), (&2, &"c"),]
-                .into_iter()
-                .collect::<BTreeSet<_>>()
+            vec![(&2, &"d"), (&2, &"c"),].into_iter().collect::<BTreeSet<_>>()
         );
 
         let range = map.get(&3).collect::<BTreeSet<_>>();
-        assert_eq!(
-            range,
-            vec![(&3, &"e"),].into_iter().collect::<BTreeSet<_>>()
-        );
+        assert_eq!(range, vec![(&3, &"e"),].into_iter().collect::<BTreeSet<_>>());
 
         let range = map.get(&4).collect::<BTreeSet<_>>();
         assert_eq!(
             range,
-            vec![(&4, &"g"), (&4, &"f"),]
-                .into_iter()
-                .collect::<BTreeSet<_>>()
+            vec![(&4, &"g"), (&4, &"f"),].into_iter().collect::<BTreeSet<_>>()
         );
     }
 
