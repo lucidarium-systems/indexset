@@ -346,6 +346,23 @@ where
     pub fn len(&self) -> usize {
         self.set.len()
     }
+    /// Returns `true` if the multimap contains no elements.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// use indexset::concurrent::multimap::BTreeMultiMap;
+    ///
+    /// let mut a = BTreeMultiMap::<usize, &str>::new();
+    /// assert!(a.is_empty());
+    /// a.insert(1, "a");
+    /// assert!(!a.is_empty());
+    /// ```
+    pub fn is_empty(&self) -> bool {
+        self.set.is_empty()
+    }
     /// Returns the total number of allocated slots across all internal nodes.
     ///
     /// This represents the number of key-value pairs the multimap can hold
@@ -572,9 +589,7 @@ mod tests {
         let mid_range = map.range(2..3).collect::<BTreeSet<_>>();
         assert_eq!(
             mid_range,
-            vec![(&2, &"c"), (&2, &"d"),]
-                .into_iter()
-                .collect::<BTreeSet<_>>()
+            vec![(&2, &"c"), (&2, &"d"),].into_iter().collect::<BTreeSet<_>>()
         );
     }
 
@@ -602,9 +617,7 @@ mod tests {
         let mid_range = map.range(2..3).collect::<BTreeSet<_>>();
         assert_eq!(
             mid_range,
-            vec![(&2, &"c"), (&2, &"d"),]
-                .into_iter()
-                .collect::<BTreeSet<_>>()
+            vec![(&2, &"c"), (&2, &"d"),].into_iter().collect::<BTreeSet<_>>()
         );
 
         let reverse_range = map.range(1..4).rev().collect::<BTreeSet<_>>();
@@ -679,31 +692,22 @@ mod tests {
 
         assert_eq!(
             range,
-            vec![(&1, &"b"), (&1, &"a"),]
-                .into_iter()
-                .collect::<BTreeSet<_>>()
+            vec![(&1, &"b"), (&1, &"a"),].into_iter().collect::<BTreeSet<_>>()
         );
 
         let range = map.get(&2).collect::<BTreeSet<_>>();
         assert_eq!(
             range,
-            vec![(&2, &"d"), (&2, &"c"),]
-                .into_iter()
-                .collect::<BTreeSet<_>>()
+            vec![(&2, &"d"), (&2, &"c"),].into_iter().collect::<BTreeSet<_>>()
         );
 
         let range = map.get(&3).collect::<BTreeSet<_>>();
-        assert_eq!(
-            range,
-            vec![(&3, &"e"),].into_iter().collect::<BTreeSet<_>>()
-        );
+        assert_eq!(range, vec![(&3, &"e"),].into_iter().collect::<BTreeSet<_>>());
 
         let range = map.get(&4).collect::<BTreeSet<_>>();
         assert_eq!(
             range,
-            vec![(&4, &"g"), (&4, &"f"),]
-                .into_iter()
-                .collect::<BTreeSet<_>>()
+            vec![(&4, &"g"), (&4, &"f"),].into_iter().collect::<BTreeSet<_>>()
         );
     }
 

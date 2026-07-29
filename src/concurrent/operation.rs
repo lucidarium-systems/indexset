@@ -32,10 +32,7 @@ where
                     if Arc::ptr_eq(entry.value(), &old_node) {
                         let mut cdc = vec![];
                         #[cfg(feature = "cdc")]
-                        let max_value = guard
-                            .max()
-                            .expect("node should be non empty if split")
-                            .clone();
+                        let max_value = guard.max().expect("node should be non empty if split").clone();
                         entry.remove();
                         let mut new_vec = guard.halve();
 
@@ -51,7 +48,7 @@ where
                         let mut old_value: Option<T> = None;
                         let mut insert_attempted = false;
                         if let Some(max) = guard.max().cloned() {
-                            if max > value {
+                            if max >= value {
                                 let (inserted, idx) = NodeLike::insert(&mut *guard, value.clone());
                                 insert_attempted = true;
                                 if !inserted {
