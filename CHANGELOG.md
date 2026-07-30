@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added `is_empty` to the concurrent `BTreeSet`, `BTreeMap`, and `BTreeMultiMap`
+- Added support for custom `BTreeMultiMap` pair representations through `MultiPairLike`, while keeping `RandomMultiPair` as the default and providing `OrdMultiPair` for ordered values and faster exact removals
+
+### Fixed
+- CDC event IDs are now assigned only after operations commit, keeping them monotonic and free of gaps during concurrent operations
+- `Pair` hashing now matches its key-only equality semantics
+- Inserting an existing key during a concurrent node split now correctly replaces the old value
+- Ranges with excluded borrowed-key bounds now omit all values for the excluded boundary keys
+- Node splitting now uses the current node length instead of its allocation capacity, preventing values from being lost with small maximum node sizes
+
 ## [0.15.0] - 2026-02-14
 
 ### Changed
