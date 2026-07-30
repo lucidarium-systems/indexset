@@ -159,7 +159,7 @@ impl<T: Ord> NodeLike<T> for Vec<T> {
     }
     #[inline]
     fn halve(&mut self) -> Self {
-        self.split_off(self.capacity() / 2)
+        self.split_off(self.len() / 2)
     }
     #[inline]
     fn need_to_split(&self, border: usize, _: &T) -> bool {

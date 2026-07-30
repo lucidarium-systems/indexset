@@ -1256,6 +1256,30 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
 
+    // Regression for https://github.com/lucidarium-systems/indexset/issues/57.
+    #[test]
+    fn test_node_size_two_preserves_all_u64_values() {
+        let set = BTreeSet::<u64>::with_maximum_node_size(2);
+
+        for value in 0..10_u64 {
+            set.insert(value);
+        }
+
+        assert_eq!(set.iter().copied().collect::<Vec<_>>(), (0..10).collect::<Vec<_>>());
+    }
+
+    // Regression for https://github.com/lucidarium-systems/indexset/issues/57.
+    #[test]
+    fn test_node_size_three_preserves_all_u8_values() {
+        let set = BTreeSet::<u8>::with_maximum_node_size(3);
+
+        for value in 0..20_u8 {
+            set.insert(value);
+        }
+
+        assert_eq!(set.iter().copied().collect::<Vec<_>>(), (0..20).collect::<Vec<_>>());
+    }
+
     #[test]
     fn test_concurrent_insert() {
         let set = Arc::new(BTreeSet::<i32>::new());

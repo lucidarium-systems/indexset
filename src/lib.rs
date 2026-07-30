@@ -3830,6 +3830,30 @@ mod tests {
         assert_eq!(expected_output, actual_output);
     }
 
+    // Regression for https://github.com/lucidarium-systems/indexset/issues/57.
+    #[test]
+    fn test_node_size_two_preserves_all_u64_values() {
+        let mut set = BTreeSet::with_maximum_node_size(2);
+
+        for value in 0..10_u64 {
+            set.insert(value);
+        }
+
+        assert_eq!(set.into_iter().collect::<Vec<_>>(), (0..10).collect::<Vec<_>>());
+    }
+
+    // Regression for https://github.com/lucidarium-systems/indexset/issues/57.
+    #[test]
+    fn test_node_size_three_preserves_all_u8_values() {
+        let mut set = BTreeSet::with_maximum_node_size(3);
+
+        for value in 0..20_u8 {
+            set.insert(value);
+        }
+
+        assert_eq!(set.into_iter().collect::<Vec<_>>(), (0..20).collect::<Vec<_>>());
+    }
+
     #[test]
     fn test_insert_duplicates() {
         let input: Vec<usize> = (0..(DEFAULT_INNER_SIZE + 1))
