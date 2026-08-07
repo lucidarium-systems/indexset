@@ -41,7 +41,7 @@ multimap = ["concurrent", "dep:fastrand"]
 features = ["cdc", "concurrent", "multimap"]
 
 [[bench]]
-name = "stdlib"
+name = "single_threaded"
 harness = false
 
 [[bench]]
