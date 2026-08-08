@@ -1,7 +1,7 @@
 [package]
 name = "indexset"
 version = "0.15.0"
-edition = "2021"
+edition = "2024"
 documentation = "https://docs.rs/indexset/"
 repository = "https://github.com/brurucy/indexset"
 license = "Apache-2.0 OR MIT"

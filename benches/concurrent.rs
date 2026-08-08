@@ -2,7 +2,7 @@ use criterion::{black_box, criterion_group, criterion_main, BatchSize, Benchmark
 use crossbeam_skiplist::SkipSet;
 use indexset::concurrent::multimap::BTreeMultiMap;
 use indexset::core::multipair::OrdMultiPair;
-use rand::{rngs::StdRng, thread_rng, Rng, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use scc::TreeIndex;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
@@ -23,14 +23,14 @@ const MULTIMAP_REMOVE_ENTRIES: usize = 20_000;
 const MULTIMAP_REMOVE_SEED: u64 = 42;
 
 // fn generate_operations(write_ratio: f64) -> Vec<Vec<Op>> {
-//     let mut rng = thread_rng();
+//     let mut rng = rand::rng();
 //     let mut all_operations: Vec<Vec<Op>> =
 //         vec![Vec::with_capacity(OPERATIONS_PER_THREAD); NUM_THREADS];
 
 //     for i in 0..TOTAL_OPERATIONS {
 //         let thread_index = i % NUM_THREADS;
-//         let value = rng.gen_range(0..TOTAL_OPERATIONS);
-//         let operation = if thread_index == NUM_READERS || rng.gen::<f64>() < write_ratio {
+//         let value = rng.random_range(0..TOTAL_OPERATIONS);
+//         let operation = if thread_index == NUM_READERS || rng.random::<f64>() < write_ratio {
 //             Op::Write(value)
 //         } else {
 //             Op::Read(value)
@@ -42,7 +42,7 @@ const MULTIMAP_REMOVE_SEED: u64 = 42;
 // }
 
 fn generate_operations(write_ratio: f64) -> Vec<Vec<Op>> {
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
     let mut all_operations = vec![Vec::with_capacity(OPERATIONS_PER_THREAD); NUM_THREADS];
 
     for thread_idx in 0..NUM_THREADS {
@@ -50,8 +50,8 @@ fn generate_operations(write_ratio: f64) -> Vec<Vec<Op>> {
         let range_end = (thread_idx + 1) * (TOTAL_OPERATIONS / NUM_THREADS);
 
         for _ in 0..OPERATIONS_PER_THREAD {
-            let value = rng.gen_range(range_start..range_end);
-            let operation = if thread_idx < NUM_WRITERS || rng.gen::<f64>() < write_ratio {
+            let value = rng.random_range(range_start..range_end);
+            let operation = if thread_idx < NUM_WRITERS || rng.random::<f64>() < write_ratio {
                 Op::Write(value)
             } else {
                 Op::Read(value)
