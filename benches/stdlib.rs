@@ -1,13 +1,12 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use rand::seq::SliceRandom;
-use rand::thread_rng;
 use scc::TreeIndex;
 use std::hint::black_box;
 
 fn criterion_benchmark(c: &mut Criterion) {
     let n = 100000;
     let mut input: Vec<usize> = (0..n).collect();
-    input.shuffle(&mut thread_rng());
+    input.shuffle(&mut rand::rng());
 
     c.bench_function("stdlib insert 100k", |b| {
         b.iter(|| {
