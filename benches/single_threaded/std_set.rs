@@ -69,10 +69,18 @@ pub fn bench_contains<T: BenchValue>(
     let mut set = None;
     group.bench_function(BenchmarkId::new("std", set_size), |b| {
         let set = set.get_or_insert_with(|| build(values));
-        b.iter(|| {
-            for key in black_box(queries) {
-                black_box(set.contains(key));
+        b.iter_custom(|iterations| {
+            let mut elapsed = Duration::ZERO;
+
+            for _ in 0..iterations {
+                let start = Instant::now();
+                for key in black_box(queries) {
+                    black_box(set.contains(key));
+                }
+                elapsed += start.elapsed();
             }
+
+            elapsed / queries.len() as u32
         });
     });
 }
@@ -84,15 +92,21 @@ pub fn bench_remove<T: BenchValue>(
     keys: &[u64],
 ) {
     group.bench_function(BenchmarkId::new("std", set_size), |b| {
-        b.iter_batched_ref(
-            || build(values),
-            |set| {
-                for key in keys {
+        b.iter_custom(|iterations| {
+            let mut elapsed = Duration::ZERO;
+
+            for _ in 0..iterations {
+                let mut set = build(values);
+
+                let start = Instant::now();
+                for key in black_box(keys) {
                     black_box(set.remove(black_box(key)));
                 }
-            },
-            BatchSize::PerIteration,
-        );
+                elapsed += start.elapsed();
+            }
+
+            elapsed / keys.len() as u32
+        });
     });
 }
 

@@ -79,10 +79,18 @@ pub fn bench_contains<T: BenchValue>(
     let mut set = None;
     group.bench_function(BenchmarkId::new(id(node_capacity), set_size), |b| {
         let set = set.get_or_insert_with(|| build(values, node_capacity));
-        b.iter(|| {
-            for key in black_box(queries) {
-                black_box(set.contains(key));
+        b.iter_custom(|iterations| {
+            let mut elapsed = Duration::ZERO;
+
+            for _ in 0..iterations {
+                let start = Instant::now();
+                for key in black_box(queries) {
+                    black_box(set.contains(key));
+                }
+                elapsed += start.elapsed();
             }
+
+            elapsed / queries.len() as u32
         });
     });
 }
@@ -95,15 +103,47 @@ pub fn bench_remove<T: BenchValue>(
     keys: &[u64],
 ) {
     group.bench_function(BenchmarkId::new(id(node_capacity), set_size), |b| {
-        b.iter_batched_ref(
-            || build(values, node_capacity),
-            |set| {
-                for key in keys {
+        b.iter_custom(|iterations| {
+            let mut elapsed = Duration::ZERO;
+
+            for _ in 0..iterations {
+                let mut set = build(values, node_capacity);
+
+                let start = Instant::now();
+                for key in black_box(keys) {
                     black_box(set.remove(black_box(key)));
                 }
-            },
-            BatchSize::PerIteration,
-        );
+                elapsed += start.elapsed();
+            }
+
+            elapsed / keys.len() as u32
+        });
+    });
+}
+
+pub fn bench_get_index<T: BenchValue>(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    set_size: usize,
+    node_capacity: usize,
+    values: &[T],
+    indices: &[usize],
+) {
+    let mut set = None;
+    group.bench_function(BenchmarkId::new(id(node_capacity), set_size), |b| {
+        let set = set.get_or_insert_with(|| build(values, node_capacity));
+        b.iter_custom(|iterations| {
+            let mut elapsed = Duration::ZERO;
+
+            for _ in 0..iterations {
+                let start = Instant::now();
+                for index in black_box(indices) {
+                    black_box(set.get_index(black_box(*index)));
+                }
+                elapsed += start.elapsed();
+            }
+
+            elapsed / indices.len() as u32
+        });
     });
 }
 

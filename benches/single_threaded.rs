@@ -7,9 +7,9 @@ mod value_generator;
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use std::time::Duration;
-use value_generator::{BenchValue, LargeRecord, ValueGenerator, NODE_CAPACITIES, QUERY_COUNT, RANGE_LEN, SET_SIZES};
+use value_generator::{BenchValue, LargeRecord, ValueGenerator, NODE_CAPACITIES, RANGE_LEN, SET_SIZES};
 
-const INSERT_ONE_BATCH_SIZE: usize = 32;
+const INSERT_ONE_BATCH_SIZE: usize = 128;
 const INSERT_BATCH_COUNT: usize = 1_024;
 
 fn bench_insert_batch_scenario_for<T: BenchValue>(
@@ -74,7 +74,7 @@ fn bench_contains_for<T: BenchValue>(c: &mut Criterion) {
     for hit in [true, false] {
         let outcome = if hit { "hit" } else { "miss" };
         let mut group = c.benchmark_group(format!("single_set/contains/{}/{outcome}", T::ID));
-        group.throughput(Throughput::Elements(QUERY_COUNT as u64));
+        group.throughput(Throughput::Elements(1));
 
         for set_size in SET_SIZES {
             let generator = ValueGenerator::new(set_size);
@@ -101,7 +101,7 @@ fn bench_contains(c: &mut Criterion) {
 
 fn bench_remove_for<T: BenchValue>(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("single_set/remove/{}/hit", T::ID));
-    group.throughput(Throughput::Elements(QUERY_COUNT as u64));
+    group.throughput(Throughput::Elements(1));
 
     for set_size in SET_SIZES {
         let generator = ValueGenerator::new(set_size);
@@ -119,6 +119,27 @@ fn bench_remove_for<T: BenchValue>(c: &mut Criterion) {
 fn bench_remove(c: &mut Criterion) {
     bench_remove_for::<u64>(c);
     bench_remove_for::<LargeRecord>(c);
+}
+
+fn bench_get_index_for<T: BenchValue>(c: &mut Criterion) {
+    let mut group = c.benchmark_group(format!("single_set/get_index/{}", T::ID));
+    group.throughput(Throughput::Elements(1));
+
+    for set_size in SET_SIZES {
+        let generator = ValueGenerator::new(set_size);
+        let input = generator.base_values::<T>();
+        let indices = generator.random_indices();
+        for node_capacity in NODE_CAPACITIES {
+            btree_set::bench_get_index(&mut group, set_size, node_capacity, &input, &indices);
+        }
+    }
+
+    group.finish();
+}
+
+fn bench_get_index(c: &mut Criterion) {
+    bench_get_index_for::<u64>(c);
+    bench_get_index_for::<LargeRecord>(c);
 }
 
 fn bench_traversal_for<T: BenchValue>(c: &mut Criterion) {
@@ -160,6 +181,6 @@ fn benchmark_config() -> Criterion {
 criterion_group! {
     name = benches;
     config = benchmark_config();
-    targets = bench_insert_batch, bench_insert_one, bench_contains, bench_remove, bench_traversal
+    targets = bench_insert_batch, bench_insert_one, bench_contains, bench_remove, bench_get_index, bench_traversal
 }
 criterion_main!(benches);

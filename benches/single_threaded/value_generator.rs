@@ -117,6 +117,14 @@ impl ValueGenerator {
         self.base_keys.iter().take(QUERY_COUNT).map(|key| key + 1).collect()
     }
 
+    pub fn random_indices(&self) -> Vec<usize> {
+        self.base_keys
+            .iter()
+            .take(QUERY_COUNT)
+            .map(|key| (key / 2) as usize)
+            .collect()
+    }
+
     fn new_keys(&self, count: usize) -> Vec<u64> {
         (0..count)
             .map(|index| {
