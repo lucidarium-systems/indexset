@@ -1,13 +1,12 @@
-#[path = "single_threaded/btree_map.rs"]
-mod btree_map;
+#[path = "single_threaded/map.rs"]
+mod map;
 #[path = "single_threaded/set.rs"]
 mod set;
-#[path = "single_threaded/std_map.rs"]
-mod std_map;
 #[path = "value_generator.rs"]
 mod value_generator;
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use map::{IndexMap, StdMap};
 use set::{IndexSet, StdSet};
 use std::time::Duration;
 use value_generator::{
@@ -173,9 +172,9 @@ fn bench_map_insert_batch_scenario_for<V: BenchMapValue>(c: &mut Criterion, scen
     group.throughput(Throughput::Elements(INSERT_BATCH_COUNT as u64));
 
     for map_size in SET_SIZES {
-        std_map::bench_insert_batch::<V>(&mut group, map_size, INSERT_BATCH_COUNT, kind);
+        map::bench_insert_batch::<V, StdMap<V>>(&mut group, map_size, DEFAULT_NODE_CAPACITY, INSERT_BATCH_COUNT, kind);
         for node_capacity in NODE_CAPACITIES {
-            btree_map::bench_insert_batch::<V>(&mut group, map_size, node_capacity, INSERT_BATCH_COUNT, kind);
+            map::bench_insert_batch::<V, IndexMap<V>>(&mut group, map_size, node_capacity, INSERT_BATCH_COUNT, kind);
         }
     }
 
@@ -194,9 +193,9 @@ fn bench_map_insert_one_scenario_for<V: BenchMapValue>(c: &mut Criterion, scenar
     group.throughput(Throughput::Elements(1));
 
     for map_size in SET_SIZES {
-        std_map::bench_insert_one::<V>(&mut group, map_size, INSERT_ONE_BATCH_SIZE, kind);
+        map::bench_insert_one::<V, StdMap<V>>(&mut group, map_size, DEFAULT_NODE_CAPACITY, INSERT_ONE_BATCH_SIZE, kind);
         for node_capacity in NODE_CAPACITIES {
-            btree_map::bench_insert_one::<V>(&mut group, map_size, node_capacity, INSERT_ONE_BATCH_SIZE, kind);
+            map::bench_insert_one::<V, IndexMap<V>>(&mut group, map_size, node_capacity, INSERT_ONE_BATCH_SIZE, kind);
         }
     }
 
@@ -217,9 +216,9 @@ fn bench_map_get_for<V: BenchMapValue>(c: &mut Criterion) {
         group.throughput(Throughput::Elements(1));
 
         for map_size in SET_SIZES {
-            std_map::bench_get::<V>(&mut group, map_size, hit);
+            map::bench_get::<V, StdMap<V>>(&mut group, map_size, DEFAULT_NODE_CAPACITY, hit);
             for node_capacity in NODE_CAPACITIES {
-                btree_map::bench_get::<V>(&mut group, map_size, node_capacity, hit);
+                map::bench_get::<V, IndexMap<V>>(&mut group, map_size, node_capacity, hit);
             }
         }
 
@@ -237,9 +236,9 @@ fn bench_map_remove_for<V: BenchMapValue>(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
 
     for map_size in SET_SIZES {
-        std_map::bench_remove::<V>(&mut group, map_size);
+        map::bench_remove::<V, StdMap<V>>(&mut group, map_size, DEFAULT_NODE_CAPACITY);
         for node_capacity in NODE_CAPACITIES {
-            btree_map::bench_remove::<V>(&mut group, map_size, node_capacity);
+            map::bench_remove::<V, IndexMap<V>>(&mut group, map_size, node_capacity);
         }
     }
 
@@ -255,9 +254,9 @@ fn bench_map_traversal_for<V: BenchMapValue>(c: &mut Criterion) {
     let mut full_group = c.benchmark_group(format!("single_map/traversal/{}/full", V::ID));
     for map_size in SET_SIZES {
         full_group.throughput(Throughput::Elements(map_size as u64));
-        std_map::bench_traversal::<V>(&mut full_group, map_size);
+        map::bench_traversal::<V, StdMap<V>>(&mut full_group, map_size, DEFAULT_NODE_CAPACITY);
         for node_capacity in NODE_CAPACITIES {
-            btree_map::bench_traversal::<V>(&mut full_group, map_size, node_capacity);
+            map::bench_traversal::<V, IndexMap<V>>(&mut full_group, map_size, node_capacity);
         }
     }
     full_group.finish();
@@ -265,9 +264,9 @@ fn bench_map_traversal_for<V: BenchMapValue>(c: &mut Criterion) {
     let mut range_group = c.benchmark_group(format!("single_map/traversal/{}/range_128", V::ID));
     range_group.throughput(Throughput::Elements(RANGE_LEN as u64));
     for map_size in SET_SIZES {
-        std_map::bench_range::<V>(&mut range_group, map_size);
+        map::bench_range::<V, StdMap<V>>(&mut range_group, map_size, DEFAULT_NODE_CAPACITY);
         for node_capacity in NODE_CAPACITIES {
-            btree_map::bench_range::<V>(&mut range_group, map_size, node_capacity);
+            map::bench_range::<V, IndexMap<V>>(&mut range_group, map_size, node_capacity);
         }
     }
     range_group.finish();
