@@ -1,7 +1,7 @@
 #[path = "concurrent/set.rs"]
 mod set;
 #[allow(dead_code)]
-#[path = "single_threaded/value_generator.rs"]
+#[path = "value_generator.rs"]
 mod value_generator;
 #[path = "concurrent/workload.rs"]
 mod workload;
