@@ -1,19 +1,17 @@
-#[path = "single_threaded/btree_map.rs"]
-mod btree_map;
-#[path = "single_threaded/btree_set.rs"]
-mod btree_set;
-#[path = "single_threaded/std_map.rs"]
-mod std_map;
-#[path = "single_threaded/std_set.rs"]
-mod std_set;
-#[path = "single_threaded/value_generator.rs"]
+#[path = "single_threaded/map.rs"]
+mod map;
+#[path = "single_threaded/set.rs"]
+mod set;
+#[path = "value_generator.rs"]
 mod value_generator;
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use map::{IndexMap, StdMap};
+use set::{IndexSet, StdSet};
 use std::time::Duration;
 use value_generator::{
-    BenchMapValue, BenchValue, LargeMapValue, LargeRecord, MapInsertionKind, ValueGenerator, NODE_CAPACITIES,
-    RANGE_LEN, SET_SIZES,
+    BenchMapValue, BenchValue, LargeMapValue, LargeRecord, MapInsertionKind, ValueGenerator, DEFAULT_NODE_CAPACITY,
+    NODE_CAPACITIES, RANGE_LEN, SET_SIZES,
 };
 
 const INSERT_ONE_BATCH_SIZE: usize = 128;
@@ -22,18 +20,27 @@ const INSERT_BATCH_COUNT: usize = 1_024;
 fn bench_insert_batch_scenario_for<T: BenchValue>(
     c: &mut Criterion,
     scenario: &str,
-    make_insertions: impl Fn(&ValueGenerator) -> Vec<T>,
+    make_insertions: impl Fn(&ValueGenerator) -> Vec<T> + Copy + 'static,
 ) {
     let mut group = c.benchmark_group(format!("single_set/insert_batch/{}/{scenario}", T::ID));
 
     for set_size in SET_SIZES {
-        let generator = ValueGenerator::new(set_size);
-        let base_values = generator.base_values::<T>();
-        let insertions = make_insertions(&generator);
         group.throughput(Throughput::Elements(INSERT_BATCH_COUNT as u64));
-        std_set::bench_insert_batch(&mut group, set_size, INSERT_BATCH_COUNT, &base_values, &insertions);
+        set::bench_insert_batch::<T, StdSet<T>, _>(
+            &mut group,
+            set_size,
+            DEFAULT_NODE_CAPACITY,
+            INSERT_BATCH_COUNT,
+            make_insertions,
+        );
         for node_capacity in NODE_CAPACITIES {
-            btree_set::bench_insert_batch(&mut group, set_size, node_capacity, &base_values, &insertions);
+            set::bench_insert_batch::<T, IndexSet<T>, _>(
+                &mut group,
+                set_size,
+                node_capacity,
+                INSERT_BATCH_COUNT,
+                make_insertions,
+            );
         }
     }
 
@@ -60,12 +67,9 @@ fn bench_insert_one_for<T: BenchValue>(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
 
     for set_size in SET_SIZES {
-        let generator = ValueGenerator::new(set_size);
-        let base_values = generator.base_values::<T>();
-        let insertions = generator.regular_insertion_batch::<T>(INSERT_ONE_BATCH_SIZE);
-        std_set::bench_insert_one(&mut group, set_size, &base_values, &insertions);
+        set::bench_insert_one::<T, StdSet<T>>(&mut group, set_size, DEFAULT_NODE_CAPACITY, INSERT_ONE_BATCH_SIZE);
         for node_capacity in NODE_CAPACITIES {
-            btree_set::bench_insert_one(&mut group, set_size, node_capacity, &base_values, &insertions);
+            set::bench_insert_one::<T, IndexSet<T>>(&mut group, set_size, node_capacity, INSERT_ONE_BATCH_SIZE);
         }
     }
 
@@ -84,16 +88,9 @@ fn bench_contains_for<T: BenchValue>(c: &mut Criterion) {
         group.throughput(Throughput::Elements(1));
 
         for set_size in SET_SIZES {
-            let generator = ValueGenerator::new(set_size);
-            let input = generator.base_values::<T>();
-            let queries = if hit {
-                generator.hit_keys()
-            } else {
-                generator.miss_keys()
-            };
-            std_set::bench_contains(&mut group, set_size, &input, &queries);
+            set::bench_contains::<T, StdSet<T>>(&mut group, set_size, DEFAULT_NODE_CAPACITY, hit);
             for node_capacity in NODE_CAPACITIES {
-                btree_set::bench_contains(&mut group, set_size, node_capacity, &input, &queries);
+                set::bench_contains::<T, IndexSet<T>>(&mut group, set_size, node_capacity, hit);
             }
         }
 
@@ -111,12 +108,9 @@ fn bench_remove_for<T: BenchValue>(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
 
     for set_size in SET_SIZES {
-        let generator = ValueGenerator::new(set_size);
-        let input = generator.base_values::<T>();
-        let keys = generator.hit_keys();
-        std_set::bench_remove(&mut group, set_size, &input, &keys);
+        set::bench_remove::<T, StdSet<T>>(&mut group, set_size, DEFAULT_NODE_CAPACITY);
         for node_capacity in NODE_CAPACITIES {
-            btree_set::bench_remove(&mut group, set_size, node_capacity, &input, &keys);
+            set::bench_remove::<T, IndexSet<T>>(&mut group, set_size, node_capacity);
         }
     }
 
@@ -133,11 +127,8 @@ fn bench_get_index_for<T: BenchValue>(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
 
     for set_size in SET_SIZES {
-        let generator = ValueGenerator::new(set_size);
-        let input = generator.base_values::<T>();
-        let indices = generator.random_indices();
         for node_capacity in NODE_CAPACITIES {
-            btree_set::bench_get_index(&mut group, set_size, node_capacity, &input, &indices);
+            set::bench_get_index::<T>(&mut group, set_size, node_capacity);
         }
     }
 
@@ -152,11 +143,10 @@ fn bench_get_index(c: &mut Criterion) {
 fn bench_traversal_for<T: BenchValue>(c: &mut Criterion) {
     let mut full_group = c.benchmark_group(format!("single_set/traversal/{}/full", T::ID));
     for set_size in SET_SIZES {
-        let input = ValueGenerator::new(set_size).base_values::<T>();
         full_group.throughput(Throughput::Elements(set_size as u64));
-        std_set::bench_traversal(&mut full_group, set_size, &input);
+        set::bench_traversal::<T, StdSet<T>>(&mut full_group, set_size, DEFAULT_NODE_CAPACITY);
         for node_capacity in NODE_CAPACITIES {
-            btree_set::bench_traversal(&mut full_group, set_size, node_capacity, &input);
+            set::bench_traversal::<T, IndexSet<T>>(&mut full_group, set_size, node_capacity);
         }
     }
     full_group.finish();
@@ -164,10 +154,9 @@ fn bench_traversal_for<T: BenchValue>(c: &mut Criterion) {
     let mut range_group = c.benchmark_group(format!("single_set/traversal/{}/range_128", T::ID));
     range_group.throughput(Throughput::Elements(RANGE_LEN as u64));
     for set_size in SET_SIZES {
-        let input = ValueGenerator::new(set_size).base_values::<T>();
-        std_set::bench_range(&mut range_group, set_size, &input);
+        set::bench_range::<T, StdSet<T>>(&mut range_group, set_size, DEFAULT_NODE_CAPACITY);
         for node_capacity in NODE_CAPACITIES {
-            btree_set::bench_range(&mut range_group, set_size, node_capacity, &input);
+            set::bench_range::<T, IndexSet<T>>(&mut range_group, set_size, node_capacity);
         }
     }
     range_group.finish();
@@ -183,9 +172,9 @@ fn bench_map_insert_batch_scenario_for<V: BenchMapValue>(c: &mut Criterion, scen
     group.throughput(Throughput::Elements(INSERT_BATCH_COUNT as u64));
 
     for map_size in SET_SIZES {
-        std_map::bench_insert_batch::<V>(&mut group, map_size, INSERT_BATCH_COUNT, kind);
+        map::bench_insert_batch::<V, StdMap<V>>(&mut group, map_size, DEFAULT_NODE_CAPACITY, INSERT_BATCH_COUNT, kind);
         for node_capacity in NODE_CAPACITIES {
-            btree_map::bench_insert_batch::<V>(&mut group, map_size, node_capacity, INSERT_BATCH_COUNT, kind);
+            map::bench_insert_batch::<V, IndexMap<V>>(&mut group, map_size, node_capacity, INSERT_BATCH_COUNT, kind);
         }
     }
 
@@ -204,9 +193,9 @@ fn bench_map_insert_one_scenario_for<V: BenchMapValue>(c: &mut Criterion, scenar
     group.throughput(Throughput::Elements(1));
 
     for map_size in SET_SIZES {
-        std_map::bench_insert_one::<V>(&mut group, map_size, INSERT_ONE_BATCH_SIZE, kind);
+        map::bench_insert_one::<V, StdMap<V>>(&mut group, map_size, DEFAULT_NODE_CAPACITY, INSERT_ONE_BATCH_SIZE, kind);
         for node_capacity in NODE_CAPACITIES {
-            btree_map::bench_insert_one::<V>(&mut group, map_size, node_capacity, INSERT_ONE_BATCH_SIZE, kind);
+            map::bench_insert_one::<V, IndexMap<V>>(&mut group, map_size, node_capacity, INSERT_ONE_BATCH_SIZE, kind);
         }
     }
 
@@ -227,9 +216,9 @@ fn bench_map_get_for<V: BenchMapValue>(c: &mut Criterion) {
         group.throughput(Throughput::Elements(1));
 
         for map_size in SET_SIZES {
-            std_map::bench_get::<V>(&mut group, map_size, hit);
+            map::bench_get::<V, StdMap<V>>(&mut group, map_size, DEFAULT_NODE_CAPACITY, hit);
             for node_capacity in NODE_CAPACITIES {
-                btree_map::bench_get::<V>(&mut group, map_size, node_capacity, hit);
+                map::bench_get::<V, IndexMap<V>>(&mut group, map_size, node_capacity, hit);
             }
         }
 
@@ -247,9 +236,9 @@ fn bench_map_remove_for<V: BenchMapValue>(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
 
     for map_size in SET_SIZES {
-        std_map::bench_remove::<V>(&mut group, map_size);
+        map::bench_remove::<V, StdMap<V>>(&mut group, map_size, DEFAULT_NODE_CAPACITY);
         for node_capacity in NODE_CAPACITIES {
-            btree_map::bench_remove::<V>(&mut group, map_size, node_capacity);
+            map::bench_remove::<V, IndexMap<V>>(&mut group, map_size, node_capacity);
         }
     }
 
@@ -265,9 +254,9 @@ fn bench_map_traversal_for<V: BenchMapValue>(c: &mut Criterion) {
     let mut full_group = c.benchmark_group(format!("single_map/traversal/{}/full", V::ID));
     for map_size in SET_SIZES {
         full_group.throughput(Throughput::Elements(map_size as u64));
-        std_map::bench_traversal::<V>(&mut full_group, map_size);
+        map::bench_traversal::<V, StdMap<V>>(&mut full_group, map_size, DEFAULT_NODE_CAPACITY);
         for node_capacity in NODE_CAPACITIES {
-            btree_map::bench_traversal::<V>(&mut full_group, map_size, node_capacity);
+            map::bench_traversal::<V, IndexMap<V>>(&mut full_group, map_size, node_capacity);
         }
     }
     full_group.finish();
@@ -275,9 +264,9 @@ fn bench_map_traversal_for<V: BenchMapValue>(c: &mut Criterion) {
     let mut range_group = c.benchmark_group(format!("single_map/traversal/{}/range_128", V::ID));
     range_group.throughput(Throughput::Elements(RANGE_LEN as u64));
     for map_size in SET_SIZES {
-        std_map::bench_range::<V>(&mut range_group, map_size);
+        map::bench_range::<V, StdMap<V>>(&mut range_group, map_size, DEFAULT_NODE_CAPACITY);
         for node_capacity in NODE_CAPACITIES {
-            btree_map::bench_range::<V>(&mut range_group, map_size, node_capacity);
+            map::bench_range::<V, IndexMap<V>>(&mut range_group, map_size, node_capacity);
         }
     }
     range_group.finish();
