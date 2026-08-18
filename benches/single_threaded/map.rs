@@ -1,5 +1,5 @@
 use crate::value_generator::{BenchMapValue, MapInsertionKind, ValueGenerator, RANGE_LEN};
-use criterion::{black_box, measurement::WallTime, BatchSize, BenchmarkGroup, BenchmarkId};
+use criterion::{black_box, measurement::WallTime, BenchmarkGroup, BenchmarkId};
 use std::time::{Duration, Instant};
 
 pub type IndexMap<V> = indexset::BTreeMap<u64, V>;
@@ -16,10 +16,6 @@ where
     fn traversal_checksum(&self) -> u64;
     fn range_checksum(&self, start: u64, end: u64) -> u64;
     fn benchmark_id(node_capacity: usize) -> String;
-
-    fn insert_batch_benchmark_id(node_capacity: usize, _insert_count: usize) -> String {
-        Self::benchmark_id(node_capacity)
-    }
 }
 
 impl<V: BenchMapValue> MapImplementation<V> for IndexMap<V> {
@@ -92,44 +88,6 @@ impl<V: BenchMapValue> MapImplementation<V> for StdMap<V> {
     fn benchmark_id(_node_capacity: usize) -> String {
         "std".to_owned()
     }
-
-    fn insert_batch_benchmark_id(_node_capacity: usize, insert_count: usize) -> String {
-        format!("std_batch_{insert_count}")
-    }
-}
-
-pub fn bench_insert_batch<V, M>(
-    group: &mut BenchmarkGroup<'_, WallTime>,
-    map_size: usize,
-    node_capacity: usize,
-    insert_count: usize,
-    kind: MapInsertionKind,
-) where
-    V: BenchMapValue,
-    M: MapImplementation<V>,
-{
-    let id = BenchmarkId::new(M::insert_batch_benchmark_id(node_capacity, insert_count), map_size);
-    let mut fixture = None;
-
-    group.bench_function(id, move |b| {
-        let (base_entries, insertions) = fixture.get_or_insert_with(|| {
-            let generator = ValueGenerator::new(map_size);
-            (
-                generator.map_base_entries::<V>(),
-                generator.map_insertions::<V>(insert_count, kind),
-            )
-        });
-
-        b.iter_batched_ref(
-            || (M::build(base_entries, node_capacity), insertions.clone()),
-            |(map, insertion_batch)| {
-                for (key, value) in insertion_batch.drain(..) {
-                    black_box(map.insert(black_box(key), black_box(value)));
-                }
-            },
-            BatchSize::PerIteration,
-        );
-    });
 }
 
 pub fn bench_insert_one<V, M>(

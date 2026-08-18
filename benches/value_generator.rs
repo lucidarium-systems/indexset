@@ -64,7 +64,6 @@ impl BenchMapValue for LargeMapValue {
 pub enum MapInsertionKind {
     New,
     Update,
-    UpdateHeavy,
 }
 
 impl BenchValue for u64 {
@@ -206,22 +205,6 @@ impl ValueGenerator {
                 .copied()
                 .map(|key| (key, V::updated_from_key(key)))
                 .collect(),
-            MapInsertionKind::UpdateHeavy => {
-                let new_value_count = amount / 10;
-                let existing_count = amount - new_value_count;
-                let mut entries = self
-                    .new_keys(new_value_count)
-                    .into_iter()
-                    .map(|key| (key, V::from_key(key)))
-                    .collect::<Vec<_>>();
-                entries.extend((0..existing_count).map(|index| {
-                    let position = index * self.set_size / existing_count;
-                    let key = position as u64 * 2;
-                    (key, V::updated_from_key(key))
-                }));
-                entries.shuffle(&mut StdRng::seed_from_u64(SEED));
-                entries
-            }
         }
     }
 

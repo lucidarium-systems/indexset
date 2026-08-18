@@ -14,8 +14,6 @@ use value_generator::{
     NODE_CAPACITIES, RANGE_LEN, SET_SIZES, SINGLE_OPERATION_BATCH_SIZE,
 };
 
-const INSERT_BATCH_COUNT: usize = 1_024;
-
 fn bench_insert_one_scenario_for<T: BenchValue>(
     c: &mut Criterion,
     scenario: &str,
@@ -138,27 +136,6 @@ fn bench_traversal(c: &mut Criterion) {
     bench_traversal_for::<LargeRecord>(c);
 }
 
-fn bench_map_insert_batch_scenario_for<V: BenchMapValue>(c: &mut Criterion, scenario: &str, kind: MapInsertionKind) {
-    let mut group = c.benchmark_group(format!("single_map/insert_batch/{}/{scenario}", V::ID));
-    group.throughput(Throughput::Elements(INSERT_BATCH_COUNT as u64));
-
-    for map_size in SET_SIZES {
-        map::bench_insert_batch::<V, StdMap<V>>(&mut group, map_size, DEFAULT_NODE_CAPACITY, INSERT_BATCH_COUNT, kind);
-        for node_capacity in NODE_CAPACITIES {
-            map::bench_insert_batch::<V, IndexMap<V>>(&mut group, map_size, node_capacity, INSERT_BATCH_COUNT, kind);
-        }
-    }
-
-    group.finish();
-}
-
-fn bench_map_insert_batch(c: &mut Criterion) {
-    bench_map_insert_batch_scenario_for::<u64>(c, "new", MapInsertionKind::New);
-    bench_map_insert_batch_scenario_for::<u64>(c, "90_percent_updates", MapInsertionKind::UpdateHeavy);
-    bench_map_insert_batch_scenario_for::<LargeMapValue>(c, "new", MapInsertionKind::New);
-    bench_map_insert_batch_scenario_for::<LargeMapValue>(c, "90_percent_updates", MapInsertionKind::UpdateHeavy);
-}
-
 fn bench_map_insert_one_scenario_for<V: BenchMapValue>(c: &mut Criterion, scenario: &str, kind: MapInsertionKind) {
     let mut group = c.benchmark_group(format!("single_map/insert_one/{}/{scenario}", V::ID));
     group.throughput(Throughput::Elements(1));
@@ -271,7 +248,6 @@ criterion_group! {
     name = benches;
     config = benchmark_config();
     targets = bench_insert_one, bench_insert_one_90_percent_duplicates, bench_contains, bench_remove, bench_get_index,
-        bench_traversal, bench_map_insert_batch, bench_map_insert_one, bench_map_get, bench_map_remove,
-        bench_map_traversal
+        bench_traversal, bench_map_insert_one, bench_map_get, bench_map_remove, bench_map_traversal
 }
 criterion_main!(benches);
