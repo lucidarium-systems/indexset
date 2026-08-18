@@ -4,11 +4,11 @@ use std::cmp::Ordering;
 use std::fmt::Debug;
 
 pub const DEFAULT_NODE_CAPACITY: usize = 1_024;
-pub const NODE_CAPACITIES: [usize; 4] = [64, 256, DEFAULT_NODE_CAPACITY, 4_096];
-pub const QUERY_COUNT: usize = 512;
+pub const NODE_CAPACITIES: [usize; 2] = [256, DEFAULT_NODE_CAPACITY];
 pub const RANGE_LEN: usize = 128;
 pub const SEED: u64 = 42;
-pub const SET_SIZES: [usize; 3] = [1_000, 100_000, 1_000_000];
+pub const SET_SIZES: [usize; 1] = [100_000];
+pub const SINGLE_OPERATION_BATCH_SIZE: usize = 512;
 
 pub trait BenchValue: Borrow<u64> + Clone + Ord + 'static {
     const ID: &'static str;
@@ -161,17 +161,25 @@ impl ValueGenerator {
     }
 
     pub fn hit_keys(&self) -> Vec<u64> {
-        self.base_keys.iter().take(QUERY_COUNT).copied().collect()
+        self.base_keys
+            .iter()
+            .take(SINGLE_OPERATION_BATCH_SIZE)
+            .copied()
+            .collect()
     }
 
     pub fn miss_keys(&self) -> Vec<u64> {
-        self.base_keys.iter().take(QUERY_COUNT).map(|key| key + 1).collect()
+        self.base_keys
+            .iter()
+            .take(SINGLE_OPERATION_BATCH_SIZE)
+            .map(|key| key + 1)
+            .collect()
     }
 
     pub fn random_indices(&self) -> Vec<usize> {
         self.base_keys
             .iter()
-            .take(QUERY_COUNT)
+            .take(SINGLE_OPERATION_BATCH_SIZE)
             .map(|key| (key / 2) as usize)
             .collect()
     }

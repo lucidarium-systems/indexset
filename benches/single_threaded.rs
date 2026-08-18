@@ -11,65 +11,23 @@ use set::{IndexSet, StdSet};
 use std::time::Duration;
 use value_generator::{
     BenchMapValue, BenchValue, LargeMapValue, LargeRecord, MapInsertionKind, ValueGenerator, DEFAULT_NODE_CAPACITY,
-    NODE_CAPACITIES, RANGE_LEN, SET_SIZES,
+    NODE_CAPACITIES, RANGE_LEN, SET_SIZES, SINGLE_OPERATION_BATCH_SIZE,
 };
 
-const INSERT_ONE_BATCH_SIZE: usize = 128;
 const INSERT_BATCH_COUNT: usize = 1_024;
 
-fn bench_insert_batch_scenario_for<T: BenchValue>(
+fn bench_insert_one_scenario_for<T: BenchValue>(
     c: &mut Criterion,
     scenario: &str,
     make_insertions: impl Fn(&ValueGenerator) -> Vec<T> + Copy + 'static,
 ) {
-    let mut group = c.benchmark_group(format!("single_set/insert_batch/{}/{scenario}", T::ID));
-
-    for set_size in SET_SIZES {
-        group.throughput(Throughput::Elements(INSERT_BATCH_COUNT as u64));
-        set::bench_insert_batch::<T, StdSet<T>, _>(
-            &mut group,
-            set_size,
-            DEFAULT_NODE_CAPACITY,
-            INSERT_BATCH_COUNT,
-            make_insertions,
-        );
-        for node_capacity in NODE_CAPACITIES {
-            set::bench_insert_batch::<T, IndexSet<T>, _>(
-                &mut group,
-                set_size,
-                node_capacity,
-                INSERT_BATCH_COUNT,
-                make_insertions,
-            );
-        }
-    }
-
-    group.finish();
-}
-
-fn bench_insert_batch(c: &mut Criterion) {
-    bench_insert_batch_scenario_for::<u64>(c, "regular", |generator| {
-        generator.regular_insertion_batch(INSERT_BATCH_COUNT)
-    });
-    bench_insert_batch_scenario_for::<u64>(c, "90_percent_duplicates", |generator| {
-        generator.duplicate_heavy_insertion_batch(INSERT_BATCH_COUNT)
-    });
-    bench_insert_batch_scenario_for::<LargeRecord>(c, "regular", |generator| {
-        generator.regular_insertion_batch(INSERT_BATCH_COUNT)
-    });
-    bench_insert_batch_scenario_for::<LargeRecord>(c, "90_percent_duplicates", |generator| {
-        generator.duplicate_heavy_insertion_batch(INSERT_BATCH_COUNT)
-    });
-}
-
-fn bench_insert_one_for<T: BenchValue>(c: &mut Criterion) {
-    let mut group = c.benchmark_group(format!("single_set/insert_one/{}", T::ID));
+    let mut group = c.benchmark_group(format!("single_set_v2/{scenario}/{}", T::ID));
     group.throughput(Throughput::Elements(1));
 
     for set_size in SET_SIZES {
-        set::bench_insert_one::<T, StdSet<T>>(&mut group, set_size, DEFAULT_NODE_CAPACITY, INSERT_ONE_BATCH_SIZE);
+        set::bench_insert_one::<T, StdSet<T>, _>(&mut group, set_size, DEFAULT_NODE_CAPACITY, make_insertions);
         for node_capacity in NODE_CAPACITIES {
-            set::bench_insert_one::<T, IndexSet<T>>(&mut group, set_size, node_capacity, INSERT_ONE_BATCH_SIZE);
+            set::bench_insert_one::<T, IndexSet<T>, _>(&mut group, set_size, node_capacity, make_insertions);
         }
     }
 
@@ -77,8 +35,21 @@ fn bench_insert_one_for<T: BenchValue>(c: &mut Criterion) {
 }
 
 fn bench_insert_one(c: &mut Criterion) {
-    bench_insert_one_for::<u64>(c);
-    bench_insert_one_for::<LargeRecord>(c);
+    bench_insert_one_scenario_for::<u64>(c, "insert_one", |generator| {
+        generator.regular_insertion_batch(SINGLE_OPERATION_BATCH_SIZE)
+    });
+    bench_insert_one_scenario_for::<LargeRecord>(c, "insert_one", |generator| {
+        generator.regular_insertion_batch(SINGLE_OPERATION_BATCH_SIZE)
+    });
+}
+
+fn bench_insert_one_90_percent_duplicates(c: &mut Criterion) {
+    bench_insert_one_scenario_for::<u64>(c, "insert_one_90_percent_duplicates", |generator| {
+        generator.duplicate_heavy_insertion_batch(SINGLE_OPERATION_BATCH_SIZE)
+    });
+    bench_insert_one_scenario_for::<LargeRecord>(c, "insert_one_90_percent_duplicates", |generator| {
+        generator.duplicate_heavy_insertion_batch(SINGLE_OPERATION_BATCH_SIZE)
+    });
 }
 
 fn bench_contains_for<T: BenchValue>(c: &mut Criterion) {
@@ -193,9 +164,21 @@ fn bench_map_insert_one_scenario_for<V: BenchMapValue>(c: &mut Criterion, scenar
     group.throughput(Throughput::Elements(1));
 
     for map_size in SET_SIZES {
-        map::bench_insert_one::<V, StdMap<V>>(&mut group, map_size, DEFAULT_NODE_CAPACITY, INSERT_ONE_BATCH_SIZE, kind);
+        map::bench_insert_one::<V, StdMap<V>>(
+            &mut group,
+            map_size,
+            DEFAULT_NODE_CAPACITY,
+            SINGLE_OPERATION_BATCH_SIZE,
+            kind,
+        );
         for node_capacity in NODE_CAPACITIES {
-            map::bench_insert_one::<V, IndexMap<V>>(&mut group, map_size, node_capacity, INSERT_ONE_BATCH_SIZE, kind);
+            map::bench_insert_one::<V, IndexMap<V>>(
+                &mut group,
+                map_size,
+                node_capacity,
+                SINGLE_OPERATION_BATCH_SIZE,
+                kind,
+            );
         }
     }
 
@@ -287,7 +270,8 @@ fn benchmark_config() -> Criterion {
 criterion_group! {
     name = benches;
     config = benchmark_config();
-    targets = bench_insert_batch, bench_insert_one, bench_contains, bench_remove, bench_get_index, bench_traversal,
-        bench_map_insert_batch, bench_map_insert_one, bench_map_get, bench_map_remove, bench_map_traversal
+    targets = bench_insert_one, bench_insert_one_90_percent_duplicates, bench_contains, bench_remove, bench_get_index,
+        bench_traversal, bench_map_insert_batch, bench_map_insert_one, bench_map_get, bench_map_remove,
+        bench_map_traversal
 }
 criterion_main!(benches);
