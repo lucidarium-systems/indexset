@@ -1,5 +1,8 @@
 #[path = "concurrent/map.rs"]
 mod map;
+#[cfg(feature = "multimap")]
+#[path = "concurrent/multimap.rs"]
+mod multimap;
 #[path = "concurrent/set.rs"]
 mod set;
 #[allow(dead_code)]
@@ -257,4 +260,15 @@ criterion_group! {
     targets = bench_insert_one, bench_parallel, bench_capacity_sweep, bench_map_insert_one, bench_map_parallel,
         bench_map_capacity_sweep
 }
+
+#[cfg(feature = "multimap")]
+criterion_group! {
+    name = multimap_benches;
+    config = benchmark_config();
+    targets = multimap::bench_insert_one, multimap::bench_parallel, multimap::bench_capacity_sweep
+}
+
+#[cfg(feature = "multimap")]
+criterion_main!(benches, multimap_benches);
+#[cfg(not(feature = "multimap"))]
 criterion_main!(benches);

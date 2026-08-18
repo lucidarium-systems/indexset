@@ -210,6 +210,7 @@ pub struct WorkerStats {
     pub operations: usize,
     pub successes: usize,
     pub updates: usize,
+    pub validations: usize,
     pub checksum: u64,
 }
 
@@ -218,6 +219,7 @@ impl WorkerStats {
         self.operations += other.operations;
         self.successes += other.successes;
         self.updates += other.updates;
+        self.validations += other.validations;
         self.checksum ^= other.checksum;
     }
 }
