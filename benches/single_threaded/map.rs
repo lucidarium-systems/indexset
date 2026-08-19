@@ -116,11 +116,11 @@ pub fn bench_insert_one<V, M>(
             let mut elapsed = Duration::ZERO;
 
             for _ in 0..iterations {
-                let insertion_batch = insertions.clone();
+                let mut insertion_batch = insertions.clone();
                 let mut map = M::build(base_entries, node_capacity);
 
                 let start = Instant::now();
-                for (key, value) in insertion_batch {
+                for (key, value) in insertion_batch.drain(..) {
                     black_box(map.insert(black_box(key), black_box(value)));
                 }
                 elapsed += start.elapsed();

@@ -1,4 +1,4 @@
-use crate::value_generator::{BenchValue, ValueGenerator, QUERY_COUNT, RANGE_LEN, SEED};
+use crate::value_generator::{BenchValue, ValueGenerator, SEED};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Barrier};
@@ -6,91 +6,108 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub const INSERT_BATCH_COUNT: usize = 1_024;
-pub const INSERT_ONE_BATCH_SIZE: usize = 128;
-pub const PARALLEL_OPERATION_COUNT: usize = 60_000;
-const RANGE_QUERY_COUNT: usize = QUERY_COUNT;
+pub const MIXED_OPERATION_COUNT: usize = 10_000;
+const MIXED_READ_HIT_PERCENT: usize = 90;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Scenario {
-    InsertNew,
-    InsertDuplicateHeavy,
-    ContainsHit,
-    ContainsMiss,
-    RemoveHit,
-    Range128,
-    MixedReadHeavy,
-    MixedBalanced,
+    InsertBatch,
+    InsertBatch90Duplicates,
+    MixedUsual,
+    MixedHot,
 }
 
 impl Scenario {
-    pub const ALL: [Self; 8] = [
-        Self::InsertNew,
-        Self::InsertDuplicateHeavy,
-        Self::ContainsHit,
-        Self::ContainsMiss,
-        Self::RemoveHit,
-        Self::Range128,
-        Self::MixedReadHeavy,
-        Self::MixedBalanced,
+    pub const ALL: [Self; 4] = [
+        Self::InsertBatch,
+        Self::InsertBatch90Duplicates,
+        Self::MixedUsual,
+        Self::MixedHot,
     ];
-
-    pub const CAPACITY_SWEEP: [Self; 3] = [Self::ContainsHit, Self::InsertNew, Self::MixedBalanced];
 
     pub fn id(self) -> &'static str {
         match self {
-            Self::InsertNew => "insert/new",
-            Self::InsertDuplicateHeavy => "insert/dup90",
-            Self::ContainsHit => "contains/hit",
-            Self::ContainsMiss => "contains/miss",
-            Self::RemoveHit => "remove/hit",
-            Self::Range128 => "range/128",
-            Self::MixedReadHeavy => "mixed/random_read90",
-            Self::MixedBalanced => "mixed/random_read50",
+            Self::InsertBatch => "insert_batch",
+            Self::InsertBatch90Duplicates => "insert_batch_90_duplicates",
+            Self::MixedUsual => "mixed/usual",
+            Self::MixedHot => "mixed/hot",
         }
     }
 
     pub fn operation_count(self) -> usize {
         match self {
-            Self::InsertNew | Self::InsertDuplicateHeavy => INSERT_BATCH_COUNT,
-            Self::ContainsHit | Self::ContainsMiss | Self::MixedReadHeavy | Self::MixedBalanced => {
-                PARALLEL_OPERATION_COUNT
-            }
-            Self::RemoveHit | Self::Range128 => QUERY_COUNT,
+            Self::InsertBatch | Self::InsertBatch90Duplicates => INSERT_BATCH_COUNT,
+            Self::MixedUsual | Self::MixedHot => MIXED_OPERATION_COUNT,
         }
     }
 
     pub fn expected_successes(self) -> usize {
         match self {
-            Self::InsertNew => INSERT_BATCH_COUNT,
-            Self::InsertDuplicateHeavy => INSERT_BATCH_COUNT / 10,
-            Self::ContainsHit => PARALLEL_OPERATION_COUNT,
-            Self::ContainsMiss => 0,
-            Self::RemoveHit | Self::Range128 => QUERY_COUNT,
-            Self::MixedReadHeavy => 49_200,
-            Self::MixedBalanced => 54_000,
-        }
-    }
-
-    pub fn throughput_elements(self) -> usize {
-        match self {
-            Self::Range128 => RANGE_QUERY_COUNT * RANGE_LEN,
-            _ => self.operation_count(),
+            Self::InsertBatch => INSERT_BATCH_COUNT,
+            Self::InsertBatch90Duplicates => INSERT_BATCH_COUNT / 10,
+            Self::MixedUsual | Self::MixedHot => {
+                let (read_count, write_pair_count) = self.mixed_operation_counts();
+                read_count * MIXED_READ_HIT_PERCENT / 100 + write_pair_count * 2
+            }
         }
     }
 
     pub fn expected_len(self, base_len: usize) -> usize {
         match self {
-            Self::InsertNew => base_len + INSERT_BATCH_COUNT,
-            Self::InsertDuplicateHeavy => base_len + INSERT_BATCH_COUNT / 10,
-            Self::RemoveHit => base_len - QUERY_COUNT,
-            Self::ContainsHit | Self::ContainsMiss | Self::Range128 | Self::MixedReadHeavy | Self::MixedBalanced => {
-                base_len
-            }
+            Self::InsertBatch => base_len + INSERT_BATCH_COUNT,
+            Self::InsertBatch90Duplicates => base_len + INSERT_BATCH_COUNT / 10,
+            Self::MixedUsual | Self::MixedHot => base_len,
         }
     }
 
     pub fn needs_fresh_set(self) -> bool {
-        matches!(self, Self::InsertNew | Self::InsertDuplicateHeavy | Self::RemoveHit)
+        matches!(self, Self::InsertBatch | Self::InsertBatch90Duplicates)
+    }
+
+    fn reads_per_block(self) -> usize {
+        match self {
+            Self::MixedUsual => 18,
+            Self::MixedHot => 2,
+            Self::InsertBatch | Self::InsertBatch90Duplicates => 0,
+        }
+    }
+
+    fn mixed_operation_counts(self) -> (usize, usize) {
+        let reads_per_block = self.reads_per_block();
+        let block_count = MIXED_OPERATION_COUNT / (reads_per_block + 2);
+        (block_count * reads_per_block, block_count)
+    }
+
+    pub fn validate_operations<T: BenchValue>(self, shards: &[Vec<Operation<T>>], thread_count: usize) {
+        assert_eq!(shards.len(), thread_count);
+        assert!(shards.iter().all(|shard| !shard.is_empty()));
+
+        let actual = WorkloadShape::from_shards(shards);
+        let expected = match self {
+            Self::InsertBatch => WorkloadShape {
+                inserts: INSERT_BATCH_COUNT,
+                odd_inserts: INSERT_BATCH_COUNT,
+                ..WorkloadShape::default()
+            },
+            Self::InsertBatch90Duplicates => WorkloadShape {
+                inserts: INSERT_BATCH_COUNT,
+                odd_inserts: INSERT_BATCH_COUNT / 10,
+                ..WorkloadShape::default()
+            },
+            Self::MixedUsual | Self::MixedHot => {
+                let (contains, write_pair_count) = self.mixed_operation_counts();
+                WorkloadShape {
+                    contains,
+                    contains_hits: contains * MIXED_READ_HIT_PERCENT / 100,
+                    inserts: write_pair_count,
+                    removes: write_pair_count,
+                    ..WorkloadShape::default()
+                }
+            }
+        };
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual.operation_count(), self.operation_count());
     }
 }
 
@@ -99,7 +116,41 @@ pub enum Operation<T> {
     Contains(u64),
     Insert(T),
     Remove(u64),
-    Range { start: u64, end: u64 },
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct WorkloadShape {
+    contains: usize,
+    contains_hits: usize,
+    inserts: usize,
+    odd_inserts: usize,
+    removes: usize,
+}
+
+impl WorkloadShape {
+    fn from_shards<T: BenchValue>(shards: &[Vec<Operation<T>>]) -> Self {
+        let mut shape = Self::default();
+
+        for operation in shards.iter().flatten() {
+            match operation {
+                Operation::Contains(key) => {
+                    shape.contains += 1;
+                    shape.contains_hits += usize::from(key % 2 == 0);
+                }
+                Operation::Insert(value) => {
+                    shape.inserts += 1;
+                    shape.odd_inserts += usize::from(value.key() % 2 == 1);
+                }
+                Operation::Remove(_) => shape.removes += 1,
+            }
+        }
+
+        shape
+    }
+
+    fn operation_count(&self) -> usize {
+        self.contains + self.inserts + self.removes
+    }
 }
 
 #[derive(Default)]
@@ -131,7 +182,7 @@ pub fn thread_counts() -> Vec<usize> {
 
 pub fn operations<T: BenchValue>(scenario: Scenario, set_size: usize, thread_count: usize) -> Vec<Vec<Operation<T>>> {
     match scenario {
-        Scenario::InsertNew => shard_operations(
+        Scenario::InsertBatch => shard_operations(
             ValueGenerator::new(set_size)
                 .regular_insertion_batch(INSERT_BATCH_COUNT)
                 .into_iter()
@@ -139,7 +190,7 @@ pub fn operations<T: BenchValue>(scenario: Scenario, set_size: usize, thread_cou
                 .collect(),
             thread_count,
         ),
-        Scenario::InsertDuplicateHeavy => shard_operations(
+        Scenario::InsertBatch90Duplicates => shard_operations(
             ValueGenerator::new(set_size)
                 .duplicate_heavy_insertion_batch(INSERT_BATCH_COUNT)
                 .into_iter()
@@ -147,19 +198,9 @@ pub fn operations<T: BenchValue>(scenario: Scenario, set_size: usize, thread_cou
                 .collect(),
             thread_count,
         ),
-        Scenario::ContainsHit => point_queries(set_size, true, PARALLEL_OPERATION_COUNT, thread_count),
-        Scenario::ContainsMiss => point_queries(set_size, false, PARALLEL_OPERATION_COUNT, thread_count),
-        Scenario::RemoveHit => shard_operations(
-            ValueGenerator::new(set_size)
-                .hit_keys()
-                .into_iter()
-                .map(Operation::Remove)
-                .collect(),
-            thread_count,
-        ),
-        Scenario::Range128 => range_queries(set_size, thread_count),
-        Scenario::MixedReadHeavy => mixed_operations(set_size, thread_count, 18),
-        Scenario::MixedBalanced => mixed_operations(set_size, thread_count, 2),
+        Scenario::MixedUsual | Scenario::MixedHot => {
+            mixed_operations(set_size, thread_count, scenario.reads_per_block())
+        }
     }
 }
 
@@ -183,17 +224,18 @@ where
         let finish_barrier = Arc::clone(&finish_barrier);
         let apply = Arc::clone(&apply);
         handles.push(thread::spawn(move || {
+            let mut operations = operations.into_iter();
             ready_barrier.wait();
             start_barrier.wait();
             let result = catch_unwind(AssertUnwindSafe(|| {
                 let mut stats = WorkerStats::default();
-                for operation in operations {
+                for operation in operations.by_ref() {
                     apply(collection.as_ref(), operation, &mut stats);
                 }
                 stats
             }));
             finish_barrier.wait();
-            result
+            (result, operations)
         }));
     }
 
@@ -205,7 +247,8 @@ where
 
     let mut stats = WorkerStats::default();
     for handle in handles {
-        match handle.join().expect("benchmark worker should join") {
+        let (result, _operations) = handle.join().expect("benchmark worker should join");
+        match result {
             Ok(worker_stats) => stats.merge(worker_stats),
             Err(payload) => resume_unwind(payload),
         }
@@ -214,38 +257,13 @@ where
     (elapsed, stats)
 }
 
-fn point_queries<T>(set_size: usize, hit: bool, operation_count: usize, thread_count: usize) -> Vec<Vec<Operation<T>>> {
-    let base_keys = ValueGenerator::new(set_size).base_values::<u64>();
-    let operations = (0..operation_count)
-        .map(|index| {
-            let key = base_keys[index % base_keys.len()] + u64::from(!hit);
-            Operation::Contains(key)
-        })
-        .collect();
-    shard_operations(operations, thread_count)
-}
-
-fn range_queries<T>(set_size: usize, thread_count: usize) -> Vec<Vec<Operation<T>>> {
-    let mut rng = StdRng::seed_from_u64(SEED ^ 0x00A1_1CE5);
-    let operations = (0..RANGE_QUERY_COUNT)
-        .map(|_| {
-            let start_index = rng.random_range(0..=(set_size - RANGE_LEN));
-            Operation::Range {
-                start: start_index as u64 * 2,
-                end: (start_index + RANGE_LEN) as u64 * 2,
-            }
-        })
-        .collect();
-    shard_operations(operations, thread_count)
-}
-
 fn mixed_operations<T: BenchValue>(
     set_size: usize,
     thread_count: usize,
     reads_per_block: usize,
 ) -> Vec<Vec<Operation<T>>> {
     let block_len = reads_per_block + 2;
-    let block_count = PARALLEL_OPERATION_COUNT / block_len;
+    let block_count = MIXED_OPERATION_COUNT / block_len;
     let mut base_keys = ValueGenerator::new(set_size).base_values::<u64>();
     let mutation_key_count = block_count.min(set_size / 2);
     let read_keys = base_keys.split_off(mutation_key_count);
@@ -266,7 +284,7 @@ fn mixed_operations<T: BenchValue>(
                 shards[shard].push(Operation::Insert(T::from_key(mutation_key)));
             }
             if position < reads_per_block {
-                let hit = read_index % 5 != 4;
+                let hit = read_index % 10 != 9;
                 let key = read_keys[rng.random_range(0..read_keys.len())] + u64::from(!hit);
                 shards[shard].push(Operation::Contains(key));
                 read_index += 1;

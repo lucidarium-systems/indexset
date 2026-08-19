@@ -137,7 +137,7 @@ fn bench_traversal(c: &mut Criterion) {
 }
 
 fn bench_map_insert_one_scenario_for<V: BenchMapValue>(c: &mut Criterion, scenario: &str, kind: MapInsertionKind) {
-    let mut group = c.benchmark_group(format!("single_map/insert_one/{}/{scenario}", V::ID));
+    let mut group = c.benchmark_group(format!("single_map_v2/insert_one/{}/{scenario}", V::ID));
     group.throughput(Throughput::Elements(1));
 
     for map_size in SET_SIZES {
