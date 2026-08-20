@@ -227,7 +227,7 @@ pub fn bench_multithreaded_case<V, M>(
                 assert_eq!(stats.successes, scenario.expected_successes());
                 assert_eq!(stats.updates, scenario.expected_updates());
                 assert_eq!(map.len(), scenario.expected_len(map_size));
-                if matches!(scenario, MapScenario::InsertBatch | MapScenario::InsertBatch90Updates) {
+                if matches!(scenario, MapScenario::InsertBatchNew | MapScenario::InsertBatchUpdate) {
                     for operation in fixture.operations.iter().flatten() {
                         if let MapOperation::Insert(key, value) = operation {
                             assert_eq!(map.get_checksum(key), Some(value.checksum()));

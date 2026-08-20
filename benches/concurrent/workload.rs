@@ -1,5 +1,5 @@
 use crate::value_generator::{BenchMapValue, BenchValue, MapInsertionKind, ValueGenerator, SEED};
-use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -19,41 +19,41 @@ pub enum Scenario {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MapScenario {
-    InsertBatch,
-    InsertBatch90Updates,
-    MixedUsual,
-    MixedHot,
+    InsertBatchNew,
+    InsertBatchUpdate,
+    MixedRead90Write10,
+    MixedRead50Write50,
 }
 
 impl MapScenario {
     pub const ALL: [Self; 4] = [
-        Self::InsertBatch,
-        Self::InsertBatch90Updates,
-        Self::MixedUsual,
-        Self::MixedHot,
+        Self::InsertBatchNew,
+        Self::InsertBatchUpdate,
+        Self::MixedRead90Write10,
+        Self::MixedRead50Write50,
     ];
 
     pub fn id(self) -> &'static str {
         match self {
-            Self::InsertBatch => "insert_batch",
-            Self::InsertBatch90Updates => "insert_batch_90_updates",
-            Self::MixedUsual => "mixed/usual",
-            Self::MixedHot => "mixed/hot",
+            Self::InsertBatchNew => "insert_batch/new",
+            Self::InsertBatchUpdate => "insert_batch/update",
+            Self::MixedRead90Write10 => "mixed/read90_write10",
+            Self::MixedRead50Write50 => "mixed/read50_write50",
         }
     }
 
     pub fn operation_count(self) -> usize {
         match self {
-            Self::InsertBatch | Self::InsertBatch90Updates => INSERT_BATCH_COUNT,
-            Self::MixedUsual | Self::MixedHot => MIXED_OPERATION_COUNT,
+            Self::InsertBatchNew | Self::InsertBatchUpdate => INSERT_BATCH_COUNT,
+            Self::MixedRead90Write10 | Self::MixedRead50Write50 => MIXED_OPERATION_COUNT,
         }
     }
 
     pub fn expected_successes(self) -> usize {
         match self {
-            Self::InsertBatch => INSERT_BATCH_COUNT,
-            Self::InsertBatch90Updates => INSERT_BATCH_COUNT / 10,
-            Self::MixedUsual | Self::MixedHot => {
+            Self::InsertBatchNew => INSERT_BATCH_COUNT,
+            Self::InsertBatchUpdate => 0,
+            Self::MixedRead90Write10 | Self::MixedRead50Write50 => {
                 let (read_count, write_pair_count) = self.mixed_operation_counts();
                 read_count * MIXED_READ_HIT_PERCENT / 100 + write_pair_count * 2
             }
@@ -62,28 +62,27 @@ impl MapScenario {
 
     pub fn expected_updates(self) -> usize {
         match self {
-            Self::InsertBatch90Updates => INSERT_BATCH_COUNT - INSERT_BATCH_COUNT / 10,
-            Self::InsertBatch | Self::MixedUsual | Self::MixedHot => 0,
+            Self::InsertBatchUpdate => INSERT_BATCH_COUNT,
+            Self::InsertBatchNew | Self::MixedRead90Write10 | Self::MixedRead50Write50 => 0,
         }
     }
 
     pub fn expected_len(self, base_len: usize) -> usize {
         match self {
-            Self::InsertBatch => base_len + INSERT_BATCH_COUNT,
-            Self::InsertBatch90Updates => base_len + INSERT_BATCH_COUNT / 10,
-            Self::MixedUsual | Self::MixedHot => base_len,
+            Self::InsertBatchNew => base_len + INSERT_BATCH_COUNT,
+            Self::InsertBatchUpdate | Self::MixedRead90Write10 | Self::MixedRead50Write50 => base_len,
         }
     }
 
     pub fn needs_fresh_map(self) -> bool {
-        matches!(self, Self::InsertBatch | Self::InsertBatch90Updates)
+        matches!(self, Self::InsertBatchNew | Self::InsertBatchUpdate)
     }
 
     fn reads_per_block(self) -> usize {
         match self {
-            Self::MixedUsual => 18,
-            Self::MixedHot => 2,
-            Self::InsertBatch | Self::InsertBatch90Updates => 0,
+            Self::MixedRead90Write10 => 18,
+            Self::MixedRead50Write50 => 2,
+            Self::InsertBatchNew | Self::InsertBatchUpdate => 0,
         }
     }
 
@@ -99,17 +98,16 @@ impl MapScenario {
 
         let actual = MapWorkloadShape::from_shards(shards);
         let expected = match self {
-            Self::InsertBatch => MapWorkloadShape {
+            Self::InsertBatchNew => MapWorkloadShape {
                 inserts: INSERT_BATCH_COUNT,
                 odd_inserts: INSERT_BATCH_COUNT,
                 ..MapWorkloadShape::default()
             },
-            Self::InsertBatch90Updates => MapWorkloadShape {
+            Self::InsertBatchUpdate => MapWorkloadShape {
                 inserts: INSERT_BATCH_COUNT,
-                odd_inserts: INSERT_BATCH_COUNT / 10,
                 ..MapWorkloadShape::default()
             },
-            Self::MixedUsual | Self::MixedHot => {
+            Self::MixedRead90Write10 | Self::MixedRead50Write50 => {
                 let (gets, write_pair_count) = self.mixed_operation_counts();
                 MapWorkloadShape {
                     gets,
@@ -363,7 +361,7 @@ pub fn map_operations<V: BenchMapValue>(
     thread_count: usize,
 ) -> Vec<Vec<MapOperation<V>>> {
     match scenario {
-        MapScenario::InsertBatch => shard_operations(
+        MapScenario::InsertBatchNew => shard_operations(
             ValueGenerator::new(map_size)
                 .map_insertions(INSERT_BATCH_COUNT, MapInsertionKind::New)
                 .into_iter()
@@ -371,21 +369,15 @@ pub fn map_operations<V: BenchMapValue>(
                 .collect(),
             thread_count,
         ),
-        MapScenario::InsertBatch90Updates => {
-            let generator = ValueGenerator::new(map_size);
-            let new_count = INSERT_BATCH_COUNT / 10;
-            let mut insertions = generator.map_insertions(new_count, MapInsertionKind::New);
-            insertions.extend(generator.map_insertions(INSERT_BATCH_COUNT - new_count, MapInsertionKind::Update));
-            insertions.shuffle(&mut StdRng::seed_from_u64(SEED));
-            shard_operations(
-                insertions
-                    .into_iter()
-                    .map(|(key, value)| MapOperation::Insert(key, value))
-                    .collect(),
-                thread_count,
-            )
-        }
-        MapScenario::MixedUsual | MapScenario::MixedHot => {
+        MapScenario::InsertBatchUpdate => shard_operations(
+            ValueGenerator::new(map_size)
+                .map_insertions(INSERT_BATCH_COUNT, MapInsertionKind::Update)
+                .into_iter()
+                .map(|(key, value)| MapOperation::Insert(key, value))
+                .collect(),
+            thread_count,
+        ),
+        MapScenario::MixedRead90Write10 | MapScenario::MixedRead50Write50 => {
             map_mixed_operations(map_size, thread_count, scenario.reads_per_block())
         }
     }
