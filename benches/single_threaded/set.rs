@@ -1,5 +1,5 @@
 use crate::value_generator::{BenchValue, ValueGenerator, RANGE_LEN};
-use criterion::{black_box, measurement::WallTime, BatchSize, BenchmarkGroup, BenchmarkId};
+use criterion::{black_box, measurement::WallTime, BenchmarkGroup, BenchmarkId};
 use std::time::{Duration, Instant};
 
 pub type IndexSet<T> = indexset::BTreeSet<T>;
@@ -16,10 +16,6 @@ where
     fn traversal_checksum(&self) -> u64;
     fn range_checksum(&self, start: u64, end: u64) -> u64;
     fn benchmark_id(node_capacity: usize) -> String;
-
-    fn insert_batch_benchmark_id(node_capacity: usize, _insert_count: usize) -> String {
-        Self::benchmark_id(node_capacity)
-    }
 }
 
 impl<T: BenchValue> SetImplementation<T> for IndexSet<T> {
@@ -88,24 +84,19 @@ impl<T: BenchValue> SetImplementation<T> for StdSet<T> {
     fn benchmark_id(_node_capacity: usize) -> String {
         "std".to_owned()
     }
-
-    fn insert_batch_benchmark_id(_node_capacity: usize, insert_count: usize) -> String {
-        format!("std_batch_{insert_count}")
-    }
 }
 
-pub fn bench_insert_batch<T, S, F>(
+pub fn bench_insert_one<T, S, F>(
     group: &mut BenchmarkGroup<'_, WallTime>,
     set_size: usize,
     node_capacity: usize,
-    insert_count: usize,
     make_insertions: F,
 ) where
     T: BenchValue,
     S: SetImplementation<T>,
     F: Fn(&ValueGenerator) -> Vec<T> + 'static,
 {
-    let id = BenchmarkId::new(S::insert_batch_benchmark_id(node_capacity, insert_count), set_size);
+    let id = BenchmarkId::new(S::benchmark_id(node_capacity), set_size);
     let mut fixture = None;
 
     group.bench_function(id, move |b| {
@@ -114,54 +105,21 @@ pub fn bench_insert_batch<T, S, F>(
             (generator.base_values::<T>(), make_insertions(&generator))
         });
 
-        b.iter_batched_ref(
-            || (S::build(base_values, node_capacity), insertions.clone()),
-            |(set, insertion_batch)| {
-                for value in insertion_batch.drain(..) {
-                    black_box(set.insert(black_box(value)));
-                }
-            },
-            BatchSize::PerIteration,
-        );
-    });
-}
-
-pub fn bench_insert_one<T, S>(
-    group: &mut BenchmarkGroup<'_, WallTime>,
-    set_size: usize,
-    node_capacity: usize,
-    insert_count: usize,
-) where
-    T: BenchValue,
-    S: SetImplementation<T>,
-{
-    let id = BenchmarkId::new(S::benchmark_id(node_capacity), set_size);
-    let mut fixture = None;
-
-    group.bench_function(id, move |b| {
-        let (base_values, insertions) = fixture.get_or_insert_with(|| {
-            let generator = ValueGenerator::new(set_size);
-            (
-                generator.base_values::<T>(),
-                generator.regular_insertion_batch::<T>(insert_count),
-            )
-        });
-
         b.iter_custom(|iterations| {
             let mut elapsed = Duration::ZERO;
 
             for _ in 0..iterations {
-                let insertion_batch = insertions.clone();
+                let mut insertion_batch = insertions.clone();
                 let mut set = S::build(base_values, node_capacity);
 
                 let start = Instant::now();
-                for insertion in insertion_batch {
+                for insertion in insertion_batch.drain(..) {
                     black_box(set.insert(black_box(insertion)));
                 }
                 elapsed += start.elapsed();
             }
 
-            elapsed / insert_count as u32
+            elapsed / insertions.len() as u32
         });
     });
 }
