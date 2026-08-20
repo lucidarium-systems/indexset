@@ -1,5 +1,5 @@
-use super::workload::{map_operations, run_parallel, MapOperation, MapScenario, WorkerStats, INSERT_ONE_BATCH_SIZE};
-use crate::value_generator::{BenchMapValue, MapInsertionKind, ValueGenerator, RANGE_LEN};
+use super::workload::{map_operations, run_parallel, MapOperation, MapScenario, WorkerStats};
+use crate::value_generator::{BenchMapValue, MapInsertionKind, ValueGenerator, RANGE_LEN, SINGLE_OPERATION_BATCH_SIZE};
 use criterion::{black_box, measurement::WallTime, BenchmarkGroup, BenchmarkId};
 use parking_lot::Mutex;
 use std::collections::BTreeMap as StdBTreeMap;
@@ -21,7 +21,8 @@ where
     fn insert(&self, key: u64, value: V) -> Option<V>;
     fn get_checksum(&self, key: &u64) -> Option<u64>;
     fn remove(&self, key: &u64) -> Option<V>;
-    fn range_checksum(&self, start: u64, end: u64) -> (usize, u64);
+    fn range_count(&self, start: u64, end: u64) -> usize;
+    fn range_checksum(&self, start: u64, end: u64) -> u64;
     fn len(&self) -> usize;
 
     fn benchmark_id(node_capacity: usize, thread_count: Option<usize>) -> String {
@@ -64,11 +65,14 @@ where
         self.remove(key).map(|(_, value)| value)
     }
 
-    fn range_checksum(&self, start: u64, end: u64) -> (usize, u64) {
-        self.range(start..end)
-            .fold((0, 0_u64), |(count, checksum), (key, value)| {
-                (count + 1, checksum.wrapping_add(*key).wrapping_add(value.checksum()))
-            })
+    fn range_count(&self, start: u64, end: u64) -> usize {
+        self.range(start..end).count()
+    }
+
+    fn range_checksum(&self, start: u64, end: u64) -> u64 {
+        self.range(start..end).fold(0_u64, |checksum, (key, value)| {
+            checksum.wrapping_add(*key).wrapping_add(value.checksum())
+        })
     }
 
     fn len(&self) -> usize {
@@ -103,12 +107,14 @@ where
         self.lock().remove(key)
     }
 
-    fn range_checksum(&self, start: u64, end: u64) -> (usize, u64) {
-        self.lock()
-            .range(start..end)
-            .fold((0, 0_u64), |(count, checksum), (key, value)| {
-                (count + 1, checksum.wrapping_add(*key).wrapping_add(value.checksum()))
-            })
+    fn range_count(&self, start: u64, end: u64) -> usize {
+        self.lock().range(start..end).count()
+    }
+
+    fn range_checksum(&self, start: u64, end: u64) -> u64 {
+        self.lock().range(start..end).fold(0_u64, |checksum, (key, value)| {
+            checksum.wrapping_add(*key).wrapping_add(value.checksum())
+        })
     }
 
     fn len(&self) -> usize {
@@ -139,12 +145,14 @@ where
         self.lock().remove(key)
     }
 
-    fn range_checksum(&self, start: u64, end: u64) -> (usize, u64) {
-        self.lock()
-            .range(start..end)
-            .fold((0, 0_u64), |(count, checksum), (key, value)| {
-                (count + 1, checksum.wrapping_add(*key).wrapping_add(value.checksum()))
-            })
+    fn range_count(&self, start: u64, end: u64) -> usize {
+        self.lock().range(start..end).count()
+    }
+
+    fn range_checksum(&self, start: u64, end: u64) -> u64 {
+        self.lock().range(start..end).fold(0_u64, |checksum, (key, value)| {
+            checksum.wrapping_add(*key).wrapping_add(value.checksum())
+        })
     }
 
     fn len(&self) -> usize {
@@ -170,6 +178,7 @@ where
     fn new(scenario: MapScenario, map_size: usize, node_capacity: usize, thread_count: usize) -> Self {
         let base_entries = ValueGenerator::new(map_size).map_base_entries();
         let operations = map_operations(scenario, map_size, thread_count);
+        scenario.validate_operations(&operations, thread_count);
         let stable_map = (!scenario.needs_fresh_map()).then(|| Arc::new(M::build(&base_entries, node_capacity)));
 
         Self {
@@ -180,7 +189,7 @@ where
     }
 }
 
-pub fn bench_parallel_case<V, M>(
+pub fn bench_multithreaded_case<V, M>(
     group: &mut BenchmarkGroup<'_, WallTime>,
     scenario: MapScenario,
     map_size: usize,
@@ -218,7 +227,7 @@ pub fn bench_parallel_case<V, M>(
                 assert_eq!(stats.successes, scenario.expected_successes());
                 assert_eq!(stats.updates, scenario.expected_updates());
                 assert_eq!(map.len(), scenario.expected_len(map_size));
-                if matches!(scenario, MapScenario::InsertNew | MapScenario::InsertUpdateHeavy) {
+                if matches!(scenario, MapScenario::InsertBatch | MapScenario::InsertBatch90Updates) {
                     for operation in fixture.operations.iter().flatten() {
                         if let MapOperation::Insert(key, value) = operation {
                             assert_eq!(map.get_checksum(key), Some(value.checksum()));
@@ -249,7 +258,7 @@ pub fn bench_insert_one<V, M>(
             let generator = ValueGenerator::new(map_size);
             (
                 generator.map_base_entries::<V>(),
-                generator.map_insertions::<V>(INSERT_ONE_BATCH_SIZE, kind),
+                generator.map_insertions::<V>(SINGLE_OPERATION_BATCH_SIZE, kind),
             )
         });
 
@@ -257,19 +266,18 @@ pub fn bench_insert_one<V, M>(
             let mut total_elapsed = Duration::ZERO;
 
             for _ in 0..iterations {
-                let insertion_batch = insertions.clone();
+                let mut insertion_batch = insertions.clone();
                 let map = M::build(base_entries, node_capacity);
 
                 let start = Instant::now();
-                for (key, value) in insertion_batch {
+                for (key, value) in insertion_batch.drain(..) {
                     black_box(map.insert(black_box(key), black_box(value)));
                 }
                 total_elapsed += start.elapsed();
 
                 let inserted_count = match kind {
-                    MapInsertionKind::New => INSERT_ONE_BATCH_SIZE,
+                    MapInsertionKind::New => SINGLE_OPERATION_BATCH_SIZE,
                     MapInsertionKind::Update => 0,
-                    MapInsertionKind::UpdateHeavy => INSERT_ONE_BATCH_SIZE / 10,
                 };
                 assert_eq!(map.len(), map_size + inserted_count);
                 for (key, value) in insertions.iter() {
@@ -277,8 +285,109 @@ pub fn bench_insert_one<V, M>(
                 }
             }
 
-            total_elapsed / INSERT_ONE_BATCH_SIZE as u32
+            total_elapsed / insertions.len() as u32
         });
+    });
+}
+
+pub fn bench_get<V, M>(group: &mut BenchmarkGroup<'_, WallTime>, map_size: usize, node_capacity: usize, hit: bool)
+where
+    V: BenchMapValue + Send + Sync,
+    M: MapImplementation<V>,
+{
+    let id = BenchmarkId::new(M::benchmark_id(node_capacity, None), format!("n{map_size}"));
+    let mut fixture = None;
+
+    group.bench_function(id, move |b| {
+        let (map, queries) = fixture.get_or_insert_with(|| {
+            let generator = ValueGenerator::new(map_size);
+            let queries = if hit {
+                generator.hit_keys()
+            } else {
+                generator.miss_keys()
+            };
+            let map = M::build(&generator.map_base_entries::<V>(), node_capacity);
+            assert!(queries.iter().all(|key| map.get_checksum(key).is_some() == hit));
+            (map, queries)
+        });
+
+        b.iter_custom(|iterations| {
+            let mut total_elapsed = Duration::ZERO;
+
+            for _ in 0..iterations {
+                let start = Instant::now();
+                for key in black_box(queries.as_slice()) {
+                    black_box(map.get_checksum(black_box(key)));
+                }
+                total_elapsed += start.elapsed();
+            }
+
+            total_elapsed / queries.len() as u32
+        });
+    });
+}
+
+pub fn bench_remove<V, M>(group: &mut BenchmarkGroup<'_, WallTime>, map_size: usize, node_capacity: usize, hit: bool)
+where
+    V: BenchMapValue + Send + Sync,
+    M: MapImplementation<V>,
+{
+    let id = BenchmarkId::new(M::benchmark_id(node_capacity, None), format!("n{map_size}"));
+    let mut fixture = None;
+
+    group.bench_function(id, move |b| {
+        let (base_entries, keys) = fixture.get_or_insert_with(|| {
+            let generator = ValueGenerator::new(map_size);
+            let base_entries = generator.map_base_entries::<V>();
+            let keys = if hit {
+                generator.hit_keys()
+            } else {
+                generator.miss_keys()
+            };
+            let validation_map = M::build(&base_entries, node_capacity);
+            assert!(keys.iter().all(|key| validation_map.remove(key).is_some() == hit));
+            (base_entries, keys)
+        });
+
+        b.iter_custom(|iterations| {
+            let mut total_elapsed = Duration::ZERO;
+
+            for _ in 0..iterations {
+                let map = M::build(base_entries, node_capacity);
+
+                let start = Instant::now();
+                for key in black_box(keys.as_slice()) {
+                    black_box(map.remove(black_box(key)));
+                }
+                total_elapsed += start.elapsed();
+
+                let expected_len = map_size - usize::from(hit) * keys.len();
+                assert_eq!(map.len(), expected_len);
+            }
+
+            total_elapsed / keys.len() as u32
+        });
+    });
+}
+
+pub fn bench_range<V, M>(group: &mut BenchmarkGroup<'_, WallTime>, map_size: usize, node_capacity: usize)
+where
+    V: BenchMapValue + Send + Sync,
+    M: MapImplementation<V>,
+{
+    let start = map_size as u64;
+    let end = start + (RANGE_LEN * 2) as u64;
+    let id = BenchmarkId::new(M::benchmark_id(node_capacity, None), format!("n{map_size}"));
+    let mut map = None;
+
+    group.bench_function(id, move |b| {
+        let map = map.get_or_insert_with(|| {
+            let generator = ValueGenerator::new(map_size);
+            let map = M::build(&generator.map_base_entries::<V>(), node_capacity);
+            assert_eq!(map.range_count(start, end), RANGE_LEN);
+            map
+        });
+        b.iter(|| black_box(map.range_checksum(start, end)));
     });
 }
 
@@ -315,12 +424,6 @@ where
                 stats.successes += 1;
                 stats.checksum ^= key ^ value.checksum();
             }
-        }
-        MapOperation::Range { start, end } => {
-            let (count, checksum) = black_box(map.range_checksum(black_box(start), black_box(end)));
-            stats.operations += 1;
-            stats.successes += usize::from(count == RANGE_LEN);
-            stats.checksum ^= checksum;
         }
     }
 }
