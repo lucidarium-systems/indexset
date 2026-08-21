@@ -5,17 +5,15 @@ mod workload;
 
 use self::dataset::{BenchMultiMapValue, LargeValue, MultiMapDataset, MultiMapFanout};
 use self::workload::{
-    insertions, operations, MultiMapInsertionKind, MultiMapOperation, MultiMapScenario, INSERT_ONE_BATCH_SIZE,
+    insertions, operations, point_queries, removal_pairs, MultiMapInsertionKind, MultiMapOperation, MultiMapScenario,
 };
-use super::workload::{maximum_thread_count, run_parallel, thread_counts, WorkerStats};
-use crate::value_generator::{DEFAULT_NODE_CAPACITY, NODE_CAPACITIES, SET_SIZES};
+use super::workload::{run_parallel, thread_counts, WorkerStats};
+use crate::value_generator::{NODE_CAPACITIES, SET_SIZES, SINGLE_OPERATION_BATCH_SIZE};
 use criterion::{black_box, measurement::WallTime, BenchmarkGroup, BenchmarkId, Criterion, SamplingMode, Throughput};
 use indexset::concurrent::multimap::BTreeMultiMap;
 use indexset::core::multipair::OrdMultiPair;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-const CAPACITY_SWEEP_SIZES: [usize; 2] = [100_000, 1_000_000];
 
 pub type RandomMultiMap<V> = BTreeMultiMap<u64, V>;
 pub type OrderedMultiMap<V> = BTreeMultiMap<u64, V, Vec<OrdMultiPair<u64, V>>, OrdMultiPair<u64, V>>;
@@ -30,8 +28,7 @@ where
     fn insert(&self, key: u64, value: V) -> Option<V>;
     fn get_checksum(&self, key: &u64) -> (usize, u64);
     fn contains_pair(&self, key: &u64, value: &V) -> bool;
-    fn remove_exact(&self, key: &u64, value: &V) -> Option<(u64, V)>;
-    fn range_checksum(&self, start: u64, end: u64) -> (usize, u64);
+    fn remove_pair(&self, key: &u64, value: &V) -> Option<(u64, V)>;
     fn len(&self) -> usize;
 
     fn benchmark_id(node_capacity: usize, thread_count: Option<usize>) -> String {
@@ -56,6 +53,7 @@ macro_rules! impl_multimap {
                 for (key, value) in entries {
                     assert!(map.insert(*key, value.clone()).is_none());
                 }
+                assert_eq!(map.len(), entries.len());
                 map
             }
 
@@ -76,18 +74,8 @@ macro_rules! impl_multimap {
                 self.get(key).any(|(_, candidate)| candidate == value)
             }
 
-            fn remove_exact(&self, key: &u64, value: &V) -> Option<(u64, V)> {
+            fn remove_pair(&self, key: &u64, value: &V) -> Option<(u64, V)> {
                 self.remove(key, value)
-            }
-
-            fn range_checksum(&self, start: u64, end: u64) -> (usize, u64) {
-                self.range(start..end)
-                    .fold((0, 0_u64), |(count, checksum), (key, value)| {
-                        (
-                            count + 1,
-                            checksum.wrapping_add(*key).wrapping_add(value.checksum()),
-                        )
-                    })
             }
 
             fn len(&self) -> usize {
@@ -123,7 +111,8 @@ where
         thread_count: usize,
     ) -> Self {
         let dataset = MultiMapDataset::new(pair_count, fanout);
-        let operations = operations(scenario, &dataset, fanout, thread_count);
+        let operations = operations(scenario, &dataset, thread_count);
+        scenario.validate_operations(&operations, thread_count);
         let stable_map = (!scenario.needs_fresh_map()).then(|| Arc::new(M::build(&dataset.entries, node_capacity)));
 
         Self {
@@ -134,7 +123,7 @@ where
     }
 }
 
-pub fn bench_parallel_case<V, M>(
+fn bench_multithreaded_case<V, M>(
     group: &mut BenchmarkGroup<'_, WallTime>,
     scenario: MultiMapScenario,
     pair_count: usize,
@@ -147,7 +136,7 @@ pub fn bench_parallel_case<V, M>(
 {
     let id = BenchmarkId::new(
         M::benchmark_id(node_capacity, Some(thread_count)),
-        format!("pairs{pair_count}"),
+        format!("n{pair_count}"),
     );
     let mut fixture = None;
 
@@ -169,59 +158,15 @@ pub fn bench_parallel_case<V, M>(
                 total_elapsed += elapsed;
 
                 black_box(stats.checksum);
-                assert_eq!(stats.operations, scenario.operation_count(fanout));
-                assert_eq!(stats.successes, scenario.expected_successes(fanout));
-                assert_eq!(stats.validations, scenario.operation_count(fanout));
+                assert_eq!(stats.operations, scenario.operation_count());
+                assert_eq!(stats.successes, scenario.expected_successes());
+                assert_eq!(stats.validations, scenario.operation_count());
                 assert_eq!(stats.updates, 0);
                 assert_eq!(map.len(), scenario.expected_len(pair_count));
-                verify_mutation_results(map.as_ref(), scenario, &fixture.operations);
+                verify_insertions(map.as_ref(), scenario, &fixture.operations);
             }
 
             total_elapsed
-        });
-    });
-}
-
-fn bench_insert_one_case<V, M>(
-    group: &mut BenchmarkGroup<'_, WallTime>,
-    pair_count: usize,
-    fanout: MultiMapFanout,
-    node_capacity: usize,
-    kind: MultiMapInsertionKind,
-) where
-    V: BenchMultiMapValue + Send + Sync,
-    M: MultiMapImplementation<V>,
-{
-    let id = BenchmarkId::new(M::benchmark_id(node_capacity, None), format!("pairs{pair_count}"));
-    let mut fixture = None;
-
-    group.bench_function(id, move |b| {
-        let (dataset, insertions) = fixture.get_or_insert_with(|| {
-            let dataset = MultiMapDataset::new(pair_count, fanout);
-            let insertions = insertions(&dataset, INSERT_ONE_BATCH_SIZE, kind);
-            (dataset, insertions)
-        });
-
-        b.iter_custom(|iterations| {
-            let mut total_elapsed = Duration::ZERO;
-
-            for _ in 0..iterations {
-                let insertion_batch = insertions.clone();
-                let map = M::build(&dataset.entries, node_capacity);
-
-                let start = Instant::now();
-                for (key, value) in insertion_batch {
-                    black_box(map.insert(black_box(key), black_box(value)));
-                }
-                total_elapsed += start.elapsed();
-
-                assert_eq!(map.len(), pair_count + INSERT_ONE_BATCH_SIZE);
-                for (key, value) in insertions.iter() {
-                    assert!(map.contains_pair(key, value));
-                }
-            }
-
-            total_elapsed / INSERT_ONE_BATCH_SIZE as u32
         });
     });
 }
@@ -234,9 +179,10 @@ where
     match operation {
         MultiMapOperation::Get { key, expected } => {
             let actual = black_box(map.get_checksum(black_box(&key)));
+            let valid = expected.map_or(actual.0 > 0, |expected| actual == expected);
             stats.operations += 1;
             stats.successes += usize::from(actual.0 > 0);
-            stats.validations += usize::from(expected.map_or(actual.0 > 0, |expected| actual == expected));
+            stats.validations += usize::from(valid);
             stats.checksum ^= key ^ actual.0 as u64 ^ actual.1;
         }
         MultiMapOperation::Insert(key, value) => {
@@ -247,8 +193,8 @@ where
             stats.validations += usize::from(previous.is_none());
             stats.checksum ^= key ^ checksum ^ previous.map_or(0, |value| value.checksum());
         }
-        MultiMapOperation::RemoveExact(key, value) => {
-            let removed = black_box(map.remove_exact(black_box(&key), black_box(&value)));
+        MultiMapOperation::RemovePair(key, value) => {
+            let removed = black_box(map.remove_pair(black_box(&key), black_box(&value)));
             let valid = removed
                 .as_ref()
                 .is_some_and(|(removed_key, removed_value)| *removed_key == key && removed_value == &value);
@@ -259,180 +205,306 @@ where
                 stats.checksum ^= removed_key ^ removed_value.checksum();
             }
         }
-        MultiMapOperation::Range { start, end, expected } => {
-            let actual = black_box(map.range_checksum(black_box(start), black_box(end)));
-            let valid = actual == expected;
-            stats.operations += 1;
-            stats.successes += usize::from(valid);
-            stats.validations += usize::from(valid);
-            stats.checksum ^= start ^ end ^ actual.0 as u64 ^ actual.1;
-        }
     }
 }
 
-fn verify_mutation_results<V, M>(map: &M, scenario: MultiMapScenario, operations: &[Vec<MultiMapOperation<V>>])
+fn verify_insertions<V, M>(map: &M, scenario: MultiMapScenario, operations: &[Vec<MultiMapOperation<V>>])
 where
     V: BenchMultiMapValue + Send + Sync,
     M: MultiMapImplementation<V>,
 {
-    match scenario {
-        MultiMapScenario::InsertNewKey | MultiMapScenario::InsertExistingKey => {
-            for operation in operations.iter().flatten() {
-                if let MultiMapOperation::Insert(key, value) = operation {
-                    assert!(map.contains_pair(key, value));
-                }
+    if matches!(
+        scenario,
+        MultiMapScenario::InsertBatchNew | MultiMapScenario::InsertBatchExisting
+    ) {
+        for operation in operations.iter().flatten() {
+            if let MultiMapOperation::Insert(key, value) = operation {
+                assert!(map.contains_pair(key, value));
             }
         }
-        MultiMapScenario::RemoveExactHit => {
-            for operation in operations.iter().flatten() {
-                if let MultiMapOperation::RemoveExact(key, value) = operation {
-                    assert!(!map.contains_pair(key, value));
-                }
-            }
-        }
-        MultiMapScenario::GetHit
-        | MultiMapScenario::GetMiss
-        | MultiMapScenario::Range128Keys
-        | MultiMapScenario::MixedReadHeavy
-        | MultiMapScenario::MixedBalanced => {}
     }
 }
 
-fn bench_insert_one_scenario_for<V>(c: &mut Criterion, fanout: MultiMapFanout, kind: MultiMapInsertionKind)
+fn bench_insert_case<V, M>(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    pair_count: usize,
+    fanout: MultiMapFanout,
+    node_capacity: usize,
+    kind: MultiMapInsertionKind,
+) where
+    V: BenchMultiMapValue + Send + Sync,
+    M: MultiMapImplementation<V>,
+{
+    let id = BenchmarkId::new(M::benchmark_id(node_capacity, None), format!("n{pair_count}"));
+    let mut fixture = None;
+
+    group.bench_function(id, move |b| {
+        let (dataset, insertions) = fixture.get_or_insert_with(|| {
+            let dataset = MultiMapDataset::new(pair_count, fanout);
+            let insertions = insertions(&dataset, SINGLE_OPERATION_BATCH_SIZE, kind);
+            (dataset, insertions)
+        });
+
+        b.iter_custom(|iterations| {
+            let mut total_elapsed = Duration::ZERO;
+
+            for _ in 0..iterations {
+                let mut insertion_batch = insertions.clone();
+                let map = M::build(&dataset.entries, node_capacity);
+
+                let start = Instant::now();
+                for (key, value) in insertion_batch.drain(..) {
+                    black_box(map.insert(black_box(key), black_box(value)));
+                }
+                total_elapsed += start.elapsed();
+
+                assert_eq!(
+                    insertions
+                        .iter()
+                        .filter(|(key, value)| map.contains_pair(key, value))
+                        .count(),
+                    SINGLE_OPERATION_BATCH_SIZE
+                );
+                assert_eq!(map.len(), pair_count + SINGLE_OPERATION_BATCH_SIZE);
+            }
+
+            total_elapsed / insertions.len() as u32
+        });
+    });
+}
+
+fn bench_get_case<V, M>(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    pair_count: usize,
+    fanout: MultiMapFanout,
+    node_capacity: usize,
+    hit: bool,
+) where
+    V: BenchMultiMapValue + Send + Sync,
+    M: MultiMapImplementation<V>,
+{
+    let id = BenchmarkId::new(M::benchmark_id(node_capacity, None), format!("n{pair_count}"));
+    let mut fixture = None;
+
+    group.bench_function(id, move |b| {
+        let (map, queries) = fixture.get_or_insert_with(|| {
+            let dataset = MultiMapDataset::<V>::new(pair_count, fanout);
+            let queries = point_queries(&dataset, hit);
+            let map = M::build(&dataset.entries, node_capacity);
+            assert!(queries
+                .iter()
+                .all(|query| map.get_checksum(&query.key) == query.expected));
+            (map, queries)
+        });
+
+        b.iter_custom(|iterations| {
+            let mut total_elapsed = Duration::ZERO;
+
+            for _ in 0..iterations {
+                let start = Instant::now();
+                for query in black_box(queries.as_slice()) {
+                    black_box(map.get_checksum(black_box(&query.key)));
+                }
+                total_elapsed += start.elapsed();
+            }
+
+            total_elapsed / queries.len() as u32
+        });
+    });
+}
+
+fn bench_remove_pair_case<V, M>(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    pair_count: usize,
+    fanout: MultiMapFanout,
+    node_capacity: usize,
+    hit: bool,
+) where
+    V: BenchMultiMapValue + Send + Sync,
+    M: MultiMapImplementation<V>,
+{
+    let id = BenchmarkId::new(M::benchmark_id(node_capacity, None), format!("n{pair_count}"));
+    let mut fixture = None;
+
+    group.bench_function(id, move |b| {
+        let (dataset, removals) = fixture.get_or_insert_with(|| {
+            let dataset = MultiMapDataset::new(pair_count, fanout);
+            let removals = removal_pairs(&dataset, hit);
+            let validation_map = M::build(&dataset.entries, node_capacity);
+            assert!(removals
+                .iter()
+                .all(|(key, value)| validation_map.remove_pair(key, value).is_some() == hit));
+            (dataset, removals)
+        });
+
+        b.iter_custom(|iterations| {
+            let mut total_elapsed = Duration::ZERO;
+
+            for _ in 0..iterations {
+                let map = M::build(&dataset.entries, node_capacity);
+
+                let start = Instant::now();
+                for (key, value) in black_box(removals.as_slice()) {
+                    black_box(map.remove_pair(black_box(key), black_box(value)));
+                }
+                total_elapsed += start.elapsed();
+
+                let expected_len = pair_count - usize::from(hit) * removals.len();
+                assert_eq!(map.len(), expected_len);
+                assert!(removals.iter().all(|(key, value)| !map.contains_pair(key, value)));
+            }
+
+            total_elapsed / removals.len() as u32
+        });
+    });
+}
+
+fn bench_insert_scenario_for<V>(c: &mut Criterion, fanout: MultiMapFanout, kind: MultiMapInsertionKind)
 where
     V: BenchMultiMapValue + Send + Sync,
 {
     let mut group = c.benchmark_group(format!(
-        "concurrent_multimap_v1/insert_one/{}/{}/{}",
+        "concurrent_multimap_v2/insert/{}/{}/{}",
+        kind.id(),
         V::ID,
-        fanout.id(),
-        kind.id()
+        fanout.id()
     ));
     group.throughput(Throughput::Elements(1));
-    group.sample_size(20);
 
     for pair_count in SET_SIZES {
         for node_capacity in NODE_CAPACITIES {
-            bench_insert_one_case::<V, RandomMultiMap<V>>(&mut group, pair_count, fanout, node_capacity, kind);
-            bench_insert_one_case::<V, OrderedMultiMap<V>>(&mut group, pair_count, fanout, node_capacity, kind);
+            bench_insert_case::<V, RandomMultiMap<V>>(&mut group, pair_count, fanout, node_capacity, kind);
+            bench_insert_case::<V, OrderedMultiMap<V>>(&mut group, pair_count, fanout, node_capacity, kind);
         }
     }
 
     group.finish();
 }
 
-fn bench_insert_one_for<V>(c: &mut Criterion)
-where
-    V: BenchMultiMapValue + Send + Sync,
-{
+pub fn bench_insert(c: &mut Criterion) {
     for fanout in MultiMapFanout::ALL {
-        bench_insert_one_scenario_for::<V>(c, fanout, MultiMapInsertionKind::NewKey);
-        bench_insert_one_scenario_for::<V>(c, fanout, MultiMapInsertionKind::ExistingKey);
+        for kind in [MultiMapInsertionKind::New, MultiMapInsertionKind::Existing] {
+            bench_insert_scenario_for::<u64>(c, fanout, kind);
+            bench_insert_scenario_for::<LargeValue>(c, fanout, kind);
+        }
     }
 }
 
-pub fn bench_insert_one(c: &mut Criterion) {
-    bench_insert_one_for::<u64>(c);
-    bench_insert_one_for::<LargeValue>(c);
+fn bench_get_scenario_for<V>(c: &mut Criterion, fanout: MultiMapFanout, hit: bool)
+where
+    V: BenchMultiMapValue + Send + Sync,
+{
+    let outcome = if hit { "hit" } else { "miss" };
+    let mut group = c.benchmark_group(format!(
+        "concurrent_multimap_v2/get/{outcome}/{}/{}",
+        V::ID,
+        fanout.id()
+    ));
+    group.throughput(Throughput::Elements(1));
+
+    for pair_count in SET_SIZES {
+        for node_capacity in NODE_CAPACITIES {
+            bench_get_case::<V, RandomMultiMap<V>>(&mut group, pair_count, fanout, node_capacity, hit);
+            bench_get_case::<V, OrderedMultiMap<V>>(&mut group, pair_count, fanout, node_capacity, hit);
+        }
+    }
+
+    group.finish();
 }
 
-fn bench_scenario_for<V>(c: &mut Criterion, scenario: MultiMapScenario, fanout: MultiMapFanout)
+pub fn bench_get(c: &mut Criterion) {
+    for fanout in MultiMapFanout::ALL {
+        for hit in [true, false] {
+            bench_get_scenario_for::<u64>(c, fanout, hit);
+            bench_get_scenario_for::<LargeValue>(c, fanout, hit);
+        }
+    }
+}
+
+fn bench_remove_pair_scenario_for<V>(c: &mut Criterion, fanout: MultiMapFanout, hit: bool)
+where
+    V: BenchMultiMapValue + Send + Sync,
+{
+    let outcome = if hit { "hit" } else { "miss" };
+    let mut group = c.benchmark_group(format!(
+        "concurrent_multimap_v2/remove_pair/{outcome}/{}/{}",
+        V::ID,
+        fanout.id()
+    ));
+    group.throughput(Throughput::Elements(1));
+
+    for pair_count in SET_SIZES {
+        for node_capacity in NODE_CAPACITIES {
+            bench_remove_pair_case::<V, RandomMultiMap<V>>(&mut group, pair_count, fanout, node_capacity, hit);
+            bench_remove_pair_case::<V, OrderedMultiMap<V>>(&mut group, pair_count, fanout, node_capacity, hit);
+        }
+    }
+
+    group.finish();
+}
+
+pub fn bench_remove_pair(c: &mut Criterion) {
+    for fanout in MultiMapFanout::ALL {
+        for hit in [true, false] {
+            bench_remove_pair_scenario_for::<u64>(c, fanout, hit);
+            bench_remove_pair_scenario_for::<LargeValue>(c, fanout, hit);
+        }
+    }
+}
+
+fn bench_multithreaded_scenario_for<V>(c: &mut Criterion, scenario: MultiMapScenario, fanout: MultiMapFanout)
 where
     V: BenchMultiMapValue + Send + Sync,
 {
     let mut group = c.benchmark_group(format!(
-        "concurrent_multimap_v1/{}/{}/{}",
+        "concurrent_multimap_v2/multithreaded/{}/{}/{}",
         scenario.id(),
         V::ID,
         fanout.id()
     ));
+    group.throughput(Throughput::Elements(scenario.operation_count() as u64));
     group.sampling_mode(SamplingMode::Flat);
 
     for pair_count in SET_SIZES {
-        group.throughput(Throughput::Elements(
-            scenario.throughput_elements(pair_count, fanout) as u64
-        ));
         for thread_count in thread_counts() {
-            bench_parallel_case::<V, RandomMultiMap<V>>(
-                &mut group,
-                scenario,
-                pair_count,
-                fanout,
-                DEFAULT_NODE_CAPACITY,
-                thread_count,
-            );
-            bench_parallel_case::<V, OrderedMultiMap<V>>(
-                &mut group,
-                scenario,
-                pair_count,
-                fanout,
-                DEFAULT_NODE_CAPACITY,
-                thread_count,
-            );
+            for node_capacity in NODE_CAPACITIES {
+                bench_multithreaded_case::<V, RandomMultiMap<V>>(
+                    &mut group,
+                    scenario,
+                    pair_count,
+                    fanout,
+                    node_capacity,
+                    thread_count,
+                );
+                // TODO: Re-enable dense ordered mixed benchmarks after
+                // https://github.com/lucidarium-systems/indexset/issues/68 is fixed.
+                if fanout != MultiMapFanout::Dense
+                    || !matches!(
+                        scenario,
+                        MultiMapScenario::MixedRead90Write10 | MultiMapScenario::MixedRead50Write50
+                    )
+                {
+                    bench_multithreaded_case::<V, OrderedMultiMap<V>>(
+                        &mut group,
+                        scenario,
+                        pair_count,
+                        fanout,
+                        node_capacity,
+                        thread_count,
+                    );
+                }
+            }
         }
     }
 
     group.finish();
 }
 
-pub fn bench_parallel(c: &mut Criterion) {
+pub fn bench_multithreaded(c: &mut Criterion) {
     for scenario in MultiMapScenario::ALL {
         for fanout in MultiMapFanout::ALL {
-            bench_scenario_for::<u64>(c, scenario, fanout);
-            bench_scenario_for::<LargeValue>(c, scenario, fanout);
-        }
-    }
-}
-
-fn bench_capacity_scenario_for<V>(c: &mut Criterion, scenario: MultiMapScenario, fanout: MultiMapFanout)
-where
-    V: BenchMultiMapValue + Send + Sync,
-{
-    let mut group = c.benchmark_group(format!(
-        "concurrent_multimap_v1/cap/{}/{}/{}",
-        scenario.id(),
-        V::ID,
-        fanout.id()
-    ));
-    group.sampling_mode(SamplingMode::Flat);
-
-    let thread_count = maximum_thread_count();
-    for pair_count in CAPACITY_SWEEP_SIZES {
-        group.throughput(Throughput::Elements(
-            scenario.throughput_elements(pair_count, fanout) as u64
-        ));
-        for node_capacity in NODE_CAPACITIES {
-            if node_capacity == DEFAULT_NODE_CAPACITY {
-                continue;
-            }
-
-            bench_parallel_case::<V, RandomMultiMap<V>>(
-                &mut group,
-                scenario,
-                pair_count,
-                fanout,
-                node_capacity,
-                thread_count,
-            );
-            bench_parallel_case::<V, OrderedMultiMap<V>>(
-                &mut group,
-                scenario,
-                pair_count,
-                fanout,
-                node_capacity,
-                thread_count,
-            );
-        }
-    }
-
-    group.finish();
-}
-
-pub fn bench_capacity_sweep(c: &mut Criterion) {
-    for scenario in MultiMapScenario::CAPACITY_SWEEP {
-        for fanout in MultiMapFanout::ALL {
-            bench_capacity_scenario_for::<u64>(c, scenario, fanout);
-            bench_capacity_scenario_for::<LargeValue>(c, scenario, fanout);
+            bench_multithreaded_scenario_for::<u64>(c, scenario, fanout);
+            bench_multithreaded_scenario_for::<LargeValue>(c, scenario, fanout);
         }
     }
 }

@@ -367,7 +367,8 @@ criterion_group! {
 criterion_group! {
     name = multimap_benches;
     config = benchmark_config();
-    targets = multimap::bench_insert_one, multimap::bench_parallel, multimap::bench_capacity_sweep
+    targets = multimap::bench_insert, multimap::bench_get, multimap::bench_remove_pair,
+        multimap::bench_multithreaded
 }
 
 #[cfg(feature = "multimap")]
