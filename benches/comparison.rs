@@ -38,7 +38,7 @@ fn bench_insert_one(c: &mut Criterion) {
 
 fn bench_scenario(c: &mut Criterion, scenario: MapScenario) {
     let mut group = c.benchmark_group(format!("comparison_map_v1/{}", scenario.id()));
-    group.throughput(Throughput::Elements(scenario.throughput_elements() as u64));
+    group.throughput(Throughput::Elements(scenario.operation_count() as u64));
     group.sampling_mode(SamplingMode::Flat);
 
     for map_size in SET_SIZES {

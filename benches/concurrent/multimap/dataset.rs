@@ -2,6 +2,8 @@ use crate::value_generator::SEED;
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
 use std::fmt::Debug;
 
+const KEY_STRIDE: u64 = 4_096;
+
 pub trait BenchMultiMapValue: Clone + Debug + Eq + Ord + 'static {
     const ID: &'static str;
 
@@ -79,11 +81,16 @@ where
 {
     pub fn new(pair_count: usize, fanout: MultiMapFanout) -> Self {
         let value_counts = value_counts(pair_count, fanout);
+        let (minimum, maximum) = fanout.value_count_bounds();
+        assert_eq!(value_counts.iter().sum::<usize>(), pair_count);
+        assert!(value_counts
+            .iter()
+            .all(|value_count| (minimum..=maximum).contains(value_count)));
         let mut entries = Vec::with_capacity(pair_count);
         let mut bucket_checksums = Vec::with_capacity(value_counts.len());
 
         for (key_index, value_count) in value_counts.iter().copied().enumerate() {
-            let key = key_index as u64 * 2;
+            let key = key_index as u64 * KEY_STRIDE;
             let mut checksum = 0_u64;
             for ordinal in 0..value_count as u64 {
                 let value = V::from_ordinal(ordinal);
@@ -109,7 +116,29 @@ where
     }
 
     pub fn key(&self, key_index: usize) -> u64 {
-        key_index as u64 * 2
+        key_index as u64 * KEY_STRIDE
+    }
+
+    pub fn contains_key(&self, key: u64) -> bool {
+        key % KEY_STRIDE == 0 && key / KEY_STRIDE < self.key_count() as u64
+    }
+
+    pub fn new_keys(&self, amount: usize) -> Vec<u64> {
+        assert!(amount > 0);
+        assert!(self.key_count() > 1);
+
+        let gap_count = self.key_count() - 1;
+        (0..amount)
+            .map(|index| {
+                let (gap_index, offset) = if amount <= gap_count {
+                    (index * gap_count / amount, 1)
+                } else {
+                    (index % gap_count, index / gap_count + 1)
+                };
+                assert!((offset as u64) < KEY_STRIDE);
+                self.key(gap_index) + offset as u64
+            })
+            .collect()
     }
 
     pub fn bucket_result(&self, key_index: usize) -> (usize, u64) {

@@ -1,7 +1,5 @@
-use super::workload::{
-    map_operations, run_parallel_with_context, MapOperation, MapScenario, WorkerStats, INSERT_ONE_BATCH_SIZE,
-};
-use crate::value_generator::{BenchMapValue, MapInsertionKind, ValueGenerator, RANGE_LEN};
+use super::workload::{map_operations, run_parallel_with_context, MapOperation, MapScenario, WorkerStats};
+use crate::value_generator::{BenchMapValue, MapInsertionKind, ValueGenerator, SINGLE_OPERATION_BATCH_SIZE};
 use criterion::{black_box, measurement::WallTime, BenchmarkGroup, BenchmarkId};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,7 +18,6 @@ pub trait ComparisonMap: Send + Sync + Sized + 'static {
     fn insert(&self, context: &mut Self::WorkerContext, key: u64, value: u64) -> Option<u64>;
     fn get(&self, context: &mut Self::WorkerContext, key: u64) -> Option<u64>;
     fn remove(&self, context: &mut Self::WorkerContext, key: u64) -> Option<u64>;
-    fn range_checksum(&self, context: &mut Self::WorkerContext, start: u64, end: u64) -> (usize, u64);
 }
 
 impl ComparisonMap for IndexsetMap {
@@ -47,12 +44,6 @@ impl ComparisonMap for IndexsetMap {
 
     fn remove(&self, _context: &mut Self::WorkerContext, key: u64) -> Option<u64> {
         self.remove(&key).map(|(_, value)| value)
-    }
-
-    fn range_checksum(&self, _context: &mut Self::WorkerContext, start: u64, end: u64) -> (usize, u64) {
-        self.range(start..end).fold((0, 0), |(count, checksum), (key, value)| {
-            (count + 1, checksum.wrapping_add(*key).wrapping_add(*value))
-        })
     }
 }
 
@@ -81,12 +72,6 @@ impl ComparisonMap for WorkTablesIndexMap {
     fn remove(&self, _context: &mut Self::WorkerContext, key: u64) -> Option<u64> {
         self.remove(&key).map(|(_, value)| value)
     }
-
-    fn range_checksum(&self, _context: &mut Self::WorkerContext, start: u64, end: u64) -> (usize, u64) {
-        self.range(start..end).fold((0, 0), |(count, checksum), (key, value)| {
-            (count + 1, checksum.wrapping_add(*key).wrapping_add(*value))
-        })
-    }
 }
 
 impl ComparisonMap for ArcticMap {
@@ -114,19 +99,10 @@ impl ComparisonMap for ArcticMap {
     fn remove(&self, _context: &mut Self::WorkerContext, key: u64) -> Option<u64> {
         self.remove(&key).map(|value| *value)
     }
-
-    fn range_checksum(&self, _context: &mut Self::WorkerContext, start: u64, end: u64) -> (usize, u64) {
-        self.range(start..=end - 1)
-            .entries(arctic::Order::Ascend)
-            .fold((0, 0), |(count, checksum), (key, value)| {
-                (count + 1, checksum.wrapping_add(key).wrapping_add(value))
-            })
-    }
 }
 
 pub struct CongeeWorkerContext {
     guard: congee::epoch::Guard,
-    range: [(usize, usize); RANGE_LEN],
 }
 
 impl ComparisonMap for CongeeMap {
@@ -147,10 +123,7 @@ impl ComparisonMap for CongeeMap {
     }
 
     fn worker_context(&self) -> Self::WorkerContext {
-        CongeeWorkerContext {
-            guard: self.pin(),
-            range: [(0, 0); RANGE_LEN],
-        }
+        CongeeWorkerContext { guard: self.pin() }
     }
 
     fn insert(&self, context: &mut Self::WorkerContext, key: u64, value: u64) -> Option<u64> {
@@ -166,19 +139,6 @@ impl ComparisonMap for CongeeMap {
     fn remove(&self, context: &mut Self::WorkerContext, key: u64) -> Option<u64> {
         self.remove(&(key as usize), &context.guard).map(|value| value as u64)
     }
-
-    fn range_checksum(&self, context: &mut Self::WorkerContext, start: u64, end: u64) -> (usize, u64) {
-        let count = self.range(
-            &(start as usize),
-            &((end - 1) as usize),
-            &mut context.range,
-            &context.guard,
-        );
-        let checksum = context.range[..count].iter().fold(0_u64, |checksum, (key, value)| {
-            checksum.wrapping_add(*key as u64).wrapping_add(*value as u64)
-        });
-        (count, checksum)
-    }
 }
 
 struct Fixture<M: ComparisonMap> {
@@ -191,6 +151,7 @@ impl<M: ComparisonMap> Fixture<M> {
     fn new(scenario: MapScenario, map_size: usize, node_capacity: usize, thread_count: usize) -> Self {
         let base_entries = ValueGenerator::new(map_size).map_base_entries();
         let operations = comparison_operations(scenario, map_size, thread_count);
+        scenario.validate_operations(&operations, thread_count);
         let stable_map = (!scenario.needs_fresh_map()).then(|| Arc::new(M::build(&base_entries, node_capacity)));
 
         Self {
@@ -278,8 +239,7 @@ pub fn bench_insert_one<M: ComparisonMap>(
 
                 let expected_updates = match kind {
                     MapInsertionKind::New => 0,
-                    MapInsertionKind::Update => INSERT_ONE_BATCH_SIZE,
-                    MapInsertionKind::UpdateHeavy => INSERT_ONE_BATCH_SIZE - INSERT_ONE_BATCH_SIZE / 10,
+                    MapInsertionKind::Update => SINGLE_OPERATION_BATCH_SIZE,
                 };
                 assert_eq!(updates, expected_updates);
                 for (key, value) in insertions.iter() {
@@ -287,7 +247,7 @@ pub fn bench_insert_one<M: ComparisonMap>(
                 }
             }
 
-            total_elapsed / INSERT_ONE_BATCH_SIZE as u32
+            total_elapsed / SINGLE_OPERATION_BATCH_SIZE as u32
         });
     });
 }
@@ -304,7 +264,7 @@ fn comparison_operations(scenario: MapScenario, map_size: usize, thread_count: u
 
 fn comparison_insertions(generator: &ValueGenerator, kind: MapInsertionKind) -> Vec<(u64, u64)> {
     generator
-        .map_insertions::<u64>(INSERT_ONE_BATCH_SIZE, kind)
+        .map_insertions::<u64>(SINGLE_OPERATION_BATCH_SIZE, kind)
         .into_iter()
         .map(|(key, value)| (key, comparison_value(key, value)))
         .collect()
@@ -324,24 +284,16 @@ fn comparison_value(key: u64, value: u64) -> u64 {
 fn validate_mutations<M: ComparisonMap>(map: &M, scenario: MapScenario, operation_shards: &[Vec<MapOperation<u64>>]) {
     let mut context = map.worker_context();
     match scenario {
-        MapScenario::InsertNew
-        | MapScenario::InsertUpdateHeavy
-        | MapScenario::MixedReadHeavy
-        | MapScenario::MixedBalanced => {
+        MapScenario::InsertBatchNew
+        | MapScenario::InsertBatchUpdate
+        | MapScenario::MixedRead90Write10
+        | MapScenario::MixedRead50Write50 => {
             for operation in operation_shards.iter().flatten() {
                 if let MapOperation::Insert(key, value) = operation {
                     assert_eq!(map.get(&mut context, *key), Some(*value));
                 }
             }
         }
-        MapScenario::RemoveHit => {
-            for operation in operation_shards.iter().flatten() {
-                if let MapOperation::Remove(key) = operation {
-                    assert_eq!(map.get(&mut context, *key), None);
-                }
-            }
-        }
-        MapScenario::GetHit | MapScenario::GetMiss | MapScenario::Range128 => {}
     }
 }
 
@@ -379,12 +331,6 @@ fn apply_operation<M: ComparisonMap>(
                 stats.successes += 1;
                 stats.checksum ^= key ^ value.checksum();
             }
-        }
-        MapOperation::Range { start, end } => {
-            let (count, checksum) = black_box(map.range_checksum(context, black_box(start), black_box(end)));
-            stats.operations += 1;
-            stats.successes += usize::from(count == RANGE_LEN);
-            stats.checksum ^= checksum;
         }
     }
 }
