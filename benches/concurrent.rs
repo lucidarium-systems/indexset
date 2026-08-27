@@ -1,276 +1,212 @@
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
-use crossbeam_skiplist::SkipSet;
-use indexset::concurrent::multimap::BTreeMultiMap;
-use indexset::core::multipair::OrdMultiPair;
-use rand::{rngs::StdRng, thread_rng, Rng, SeedableRng};
-use scc::TreeIndex;
-use std::ops::RangeInclusive;
-use std::sync::Arc;
-use std::thread;
+#[path = "concurrent/set.rs"]
+mod set;
+#[allow(dead_code)]
+#[path = "value_generator.rs"]
+mod value_generator;
+#[path = "concurrent/workload.rs"]
+mod workload;
 
-#[derive(Clone)]
-enum Op {
-    Read(usize),
-    Write(usize),
-}
+use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
+use set::{ConcurrentSet, MutexIndexSet, MutexStdBTreeSet};
+use std::fmt::Debug;
+use std::time::Duration;
+use value_generator::{
+    BenchValue, LargeRecord, ValueGenerator, DEFAULT_NODE_CAPACITY, NODE_CAPACITIES, RANGE_LEN, SET_SIZES,
+    SINGLE_OPERATION_BATCH_SIZE,
+};
+use workload::{thread_counts, Scenario};
 
-const NUM_READERS: usize = 30;
-const NUM_WRITERS: usize = 10;
-const NUM_THREADS: usize = NUM_READERS + NUM_WRITERS;
-const OPERATIONS_PER_THREAD: usize = 100_000;
-const TOTAL_OPERATIONS: usize = NUM_THREADS * OPERATIONS_PER_THREAD;
-const MULTIMAP_REMOVE_ENTRIES: usize = 20_000;
-const MULTIMAP_REMOVE_SEED: u64 = 42;
+fn bench_insert_one_scenario_for<T>(
+    c: &mut Criterion,
+    scenario: &str,
+    expected_new_count: usize,
+    make_insertions: impl Fn(&ValueGenerator) -> Vec<T> + Copy + 'static,
+) where
+    T: BenchValue + Debug + Send + Sync,
+{
+    let mut group = c.benchmark_group(format!("concurrent_set_v3/{scenario}/{}", T::ID));
+    group.throughput(Throughput::Elements(1));
 
-// fn generate_operations(write_ratio: f64) -> Vec<Vec<Op>> {
-//     let mut rng = thread_rng();
-//     let mut all_operations: Vec<Vec<Op>> =
-//         vec![Vec::with_capacity(OPERATIONS_PER_THREAD); NUM_THREADS];
-
-//     for i in 0..TOTAL_OPERATIONS {
-//         let thread_index = i % NUM_THREADS;
-//         let value = rng.gen_range(0..TOTAL_OPERATIONS);
-//         let operation = if thread_index == NUM_READERS || rng.gen::<f64>() < write_ratio {
-//             Op::Write(value)
-//         } else {
-//             Op::Read(value)
-//         };
-//         all_operations[thread_index].push(operation);
-//     }
-
-//     all_operations
-// }
-
-fn generate_operations(write_ratio: f64) -> Vec<Vec<Op>> {
-    let mut rng = thread_rng();
-    let mut all_operations = vec![Vec::with_capacity(OPERATIONS_PER_THREAD); NUM_THREADS];
-
-    for thread_idx in 0..NUM_THREADS {
-        let range_start = thread_idx * (TOTAL_OPERATIONS / NUM_THREADS);
-        let range_end = (thread_idx + 1) * (TOTAL_OPERATIONS / NUM_THREADS);
-
-        for _ in 0..OPERATIONS_PER_THREAD {
-            let value = rng.gen_range(range_start..range_end);
-            let operation = if thread_idx < NUM_WRITERS || rng.gen::<f64>() < write_ratio {
-                Op::Write(value)
-            } else {
-                Op::Read(value)
-            };
-            all_operations[thread_idx].push(operation);
+    for set_size in SET_SIZES {
+        for node_capacity in NODE_CAPACITIES {
+            set::bench_insert_one::<T, ConcurrentSet<T>, _>(
+                &mut group,
+                set_size,
+                node_capacity,
+                expected_new_count,
+                make_insertions,
+            );
+            set::bench_insert_one::<T, MutexIndexSet<T>, _>(
+                &mut group,
+                set_size,
+                node_capacity,
+                expected_new_count,
+                make_insertions,
+            );
         }
+        set::bench_insert_one::<T, MutexStdBTreeSet<T>, _>(
+            &mut group,
+            set_size,
+            DEFAULT_NODE_CAPACITY,
+            expected_new_count,
+            make_insertions,
+        );
     }
-    all_operations
-}
-
-fn concurrent_operations<T: Send + Sync + 'static>(
-    set: Arc<T>,
-    operations: Vec<Op>,
-    read_op: impl Fn(&T, usize) + Send + Sync + 'static,
-    write_op: impl Fn(&T, usize) + Send + Sync + 'static,
-) {
-    for op in operations {
-        match op {
-            Op::Read(value) => read_op(&set, value),
-            Op::Write(value) => write_op(&set, value),
-        }
-    }
-}
-
-fn bench_btreeset_with_ratio(c: &mut Criterion, write_ratio: f64) {
-    let operations = Arc::new(generate_operations(write_ratio));
-
-    let mut group = c.benchmark_group(format!("Write Ratio: {:.2}", write_ratio));
-    group.warm_up_time(std::time::Duration::from_millis(500));
-    group.measurement_time(std::time::Duration::from_millis(500));
-
-    group.bench_function(BenchmarkId::new("scc::TreeIndex", write_ratio), |b| {
-        b.iter(|| {
-            let set = Arc::new(TreeIndex::new());
-            let mut handles = vec![];
-
-            for thread_ops in operations.iter() {
-                let set = Arc::clone(&set);
-                let thread_ops = thread_ops.clone();
-                let handle = thread::spawn(move || {
-                    concurrent_operations(
-                        set,
-                        thread_ops,
-                        |set, item| {
-                            black_box(set.contains(&item));
-                        },
-                        |set, item| {
-                            black_box({
-                                let _ = set.insert(item, ());
-                            });
-                        },
-                    );
-                });
-                handles.push(handle);
-            }
-
-            for handle in handles {
-                handle.join().unwrap();
-            }
-        });
-    });
-
-    group.bench_function(BenchmarkId::new("ConcurrentBTreeSet", write_ratio), |b| {
-        b.iter(|| {
-            let set: Arc<indexset::concurrent::set::BTreeSet<usize>> =
-                Arc::new(indexset::concurrent::set::BTreeSet::new());
-            let mut handles = vec![];
-
-            for thread_ops in operations.iter() {
-                let set = Arc::clone(&set);
-                let thread_ops = thread_ops.clone();
-                let handle = thread::spawn(move || {
-                    concurrent_operations(
-                        set,
-                        thread_ops,
-                        |set, item| {
-                            set.contains(&item);
-                        },
-                        |set, item| {
-                            set.insert(item);
-                        },
-                    );
-                });
-                handles.push(handle);
-            }
-
-            for handle in handles {
-                handle.join().unwrap();
-            }
-        });
-    });
-
-    group.bench_function(BenchmarkId::new("SkipSet", write_ratio), |b| {
-        b.iter(|| {
-            let set = Arc::new(SkipSet::new());
-            let mut handles = vec![];
-
-            for thread_ops in operations.iter() {
-                let set = Arc::clone(&set);
-                let thread_ops = thread_ops.clone();
-                let handle = thread::spawn(move || {
-                    concurrent_operations(
-                        set,
-                        thread_ops,
-                        |set, item| {
-                            set.contains(&item);
-                        },
-                        |set, item| {
-                            set.insert(item);
-                        },
-                    );
-                });
-                handles.push(handle);
-            }
-
-            for handle in handles {
-                handle.join().unwrap();
-            }
-        });
-    });
 
     group.finish();
 }
 
-fn bench_concurrent_btreeset(c: &mut Criterion) {
-    let ratios = vec![0.01, 0.1, 0.3, 0.5];
-    for ratio in ratios {
-        bench_btreeset_with_ratio(c, ratio);
-    }
+fn bench_insert_one(c: &mut Criterion) {
+    bench_insert_one_scenario_for::<u64>(c, "insert_one", SINGLE_OPERATION_BATCH_SIZE, |generator| {
+        generator.regular_insertion_batch(SINGLE_OPERATION_BATCH_SIZE)
+    });
+    bench_insert_one_scenario_for::<LargeRecord>(c, "insert_one", SINGLE_OPERATION_BATCH_SIZE, |generator| {
+        generator.regular_insertion_batch(SINGLE_OPERATION_BATCH_SIZE)
+    });
 }
 
-fn removal_entries(values_per_key: RangeInclusive<usize>) -> Vec<(usize, usize)> {
-    let mut rng = StdRng::seed_from_u64(MULTIMAP_REMOVE_SEED);
-    let mut entries = Vec::with_capacity(MULTIMAP_REMOVE_ENTRIES);
-    let mut key = 0;
-
-    while entries.len() < MULTIMAP_REMOVE_ENTRIES {
-        let value_count = rng.random_range(values_per_key.clone());
-        entries.extend((0..value_count).map(|value| (key, value)));
-        key += 1;
-    }
-
-    entries
+fn bench_insert_one_90_duplicates(c: &mut Criterion) {
+    let expected_new_count = SINGLE_OPERATION_BATCH_SIZE / 10;
+    bench_insert_one_scenario_for::<u64>(c, "insert_one_90_duplicates", expected_new_count, |generator| {
+        generator.duplicate_heavy_insertion_batch(SINGLE_OPERATION_BATCH_SIZE)
+    });
+    bench_insert_one_scenario_for::<LargeRecord>(c, "insert_one_90_duplicates", expected_new_count, |generator| {
+        generator.duplicate_heavy_insertion_batch(SINGLE_OPERATION_BATCH_SIZE)
+    });
 }
 
-fn build_random_multimap(entries: &[(usize, usize)]) -> BTreeMultiMap<usize, usize> {
-    let map = BTreeMultiMap::<usize, usize>::new();
-    for (key, value) in entries {
-        map.insert(*key, *value);
+fn bench_contains_scenario_for<T>(c: &mut Criterion, hit: bool)
+where
+    T: BenchValue + Debug + Send + Sync,
+{
+    let outcome = if hit { "hit" } else { "miss" };
+    let mut group = c.benchmark_group(format!("concurrent_set_v3/contains/{outcome}/{}", T::ID));
+    group.throughput(Throughput::Elements(1));
+
+    for set_size in SET_SIZES {
+        for node_capacity in NODE_CAPACITIES {
+            set::bench_contains::<T, ConcurrentSet<T>>(&mut group, set_size, node_capacity, hit);
+            set::bench_contains::<T, MutexIndexSet<T>>(&mut group, set_size, node_capacity, hit);
+        }
+        set::bench_contains::<T, MutexStdBTreeSet<T>>(&mut group, set_size, DEFAULT_NODE_CAPACITY, hit);
     }
-
-    map
-}
-
-fn build_ord_multimap(
-    entries: &[(usize, usize)],
-) -> BTreeMultiMap<
-    usize,
-    usize,
-    Vec<OrdMultiPair<usize, usize>>,
-    OrdMultiPair<usize, usize>,
-> {
-    let map = BTreeMultiMap::<
-        usize,
-        usize,
-        Vec<OrdMultiPair<usize, usize>>,
-        OrdMultiPair<usize, usize>,
-    >::new();
-    for (key, value) in entries {
-        map.insert(*key, *value);
-    }
-
-    map
-}
-
-fn bench_multimap_removal(c: &mut Criterion) {
-    let usual_entries = removal_entries(1..=3);
-    let many_entries = removal_entries(1_000..=2_000);
-    let usual_target = *usual_entries.last().unwrap();
-    let many_target = *many_entries.last().unwrap();
-
-    let mut group = c.benchmark_group("BTreeMultiMap remove pair");
-    group.warm_up_time(std::time::Duration::from_millis(500));
-    group.measurement_time(std::time::Duration::from_millis(500));
-
-    group.bench_function(BenchmarkId::new("random", "1-3 values per key"), |b| {
-        b.iter_batched_ref(
-            || build_random_multimap(&usual_entries),
-            |map| black_box(map.remove(&usual_target.0, &usual_target.1)),
-            BatchSize::LargeInput,
-        );
-    });
-
-    group.bench_function(BenchmarkId::new("ord", "1-3 values per key"), |b| {
-        b.iter_batched_ref(
-            || build_ord_multimap(&usual_entries),
-            |map| black_box(map.remove(&usual_target.0, &usual_target.1)),
-            BatchSize::LargeInput,
-        );
-    });
-
-    group.bench_function(BenchmarkId::new("random", "1000-2000 values per key"), |b| {
-        b.iter_batched_ref(
-            || build_random_multimap(&many_entries),
-            |map| black_box(map.remove(&many_target.0, &many_target.1)),
-            BatchSize::LargeInput,
-        );
-    });
-
-    group.bench_function(BenchmarkId::new("ord", "1000-2000 values per key"), |b| {
-        b.iter_batched_ref(
-            || build_ord_multimap(&many_entries),
-            |map| black_box(map.remove(&many_target.0, &many_target.1)),
-            BatchSize::LargeInput,
-        );
-    });
 
     group.finish();
 }
 
-criterion_group!(benches, bench_concurrent_btreeset, bench_multimap_removal);
+fn bench_contains(c: &mut Criterion) {
+    for hit in [true, false] {
+        bench_contains_scenario_for::<u64>(c, hit);
+        bench_contains_scenario_for::<LargeRecord>(c, hit);
+    }
+}
+
+fn bench_remove_scenario_for<T>(c: &mut Criterion, hit: bool)
+where
+    T: BenchValue + Debug + Send + Sync,
+{
+    let outcome = if hit { "hit" } else { "miss" };
+    let mut group = c.benchmark_group(format!("concurrent_set_v3/remove/{outcome}/{}", T::ID));
+    group.throughput(Throughput::Elements(1));
+
+    for set_size in SET_SIZES {
+        for node_capacity in NODE_CAPACITIES {
+            set::bench_remove::<T, ConcurrentSet<T>>(&mut group, set_size, node_capacity, hit);
+            set::bench_remove::<T, MutexIndexSet<T>>(&mut group, set_size, node_capacity, hit);
+        }
+        set::bench_remove::<T, MutexStdBTreeSet<T>>(&mut group, set_size, DEFAULT_NODE_CAPACITY, hit);
+    }
+
+    group.finish();
+}
+
+fn bench_remove(c: &mut Criterion) {
+    for hit in [true, false] {
+        bench_remove_scenario_for::<u64>(c, hit);
+        bench_remove_scenario_for::<LargeRecord>(c, hit);
+    }
+}
+
+fn bench_range_for<T>(c: &mut Criterion)
+where
+    T: BenchValue + Debug + Send + Sync,
+{
+    let mut group = c.benchmark_group(format!("concurrent_set_v3/range/128/{}", T::ID));
+    group.throughput(Throughput::Elements(RANGE_LEN as u64));
+
+    for set_size in SET_SIZES {
+        for node_capacity in NODE_CAPACITIES {
+            set::bench_range::<T, ConcurrentSet<T>>(&mut group, set_size, node_capacity);
+            set::bench_range::<T, MutexIndexSet<T>>(&mut group, set_size, node_capacity);
+        }
+        set::bench_range::<T, MutexStdBTreeSet<T>>(&mut group, set_size, DEFAULT_NODE_CAPACITY);
+    }
+
+    group.finish();
+}
+
+fn bench_range(c: &mut Criterion) {
+    bench_range_for::<u64>(c);
+    bench_range_for::<LargeRecord>(c);
+}
+
+fn bench_multithreaded_scenario_for<T>(c: &mut Criterion, scenario: Scenario)
+where
+    T: BenchValue + Debug + Send + Sync,
+{
+    let mut group = c.benchmark_group(format!("concurrent_set_v3/multithreaded/{}/{}", scenario.id(), T::ID));
+    group.throughput(Throughput::Elements(scenario.operation_count() as u64));
+    group.sampling_mode(SamplingMode::Flat);
+
+    for set_size in SET_SIZES {
+        for thread_count in thread_counts() {
+            for node_capacity in NODE_CAPACITIES {
+                set::bench_multithreaded_case::<T, ConcurrentSet<T>>(
+                    &mut group,
+                    scenario,
+                    set_size,
+                    node_capacity,
+                    thread_count,
+                );
+                set::bench_multithreaded_case::<T, MutexIndexSet<T>>(
+                    &mut group,
+                    scenario,
+                    set_size,
+                    node_capacity,
+                    thread_count,
+                );
+            }
+            set::bench_multithreaded_case::<T, MutexStdBTreeSet<T>>(
+                &mut group,
+                scenario,
+                set_size,
+                DEFAULT_NODE_CAPACITY,
+                thread_count,
+            );
+        }
+    }
+
+    group.finish();
+}
+
+fn bench_multithreaded(c: &mut Criterion) {
+    for scenario in Scenario::ALL {
+        bench_multithreaded_scenario_for::<u64>(c, scenario);
+        bench_multithreaded_scenario_for::<LargeRecord>(c, scenario);
+    }
+}
+
+fn benchmark_config() -> Criterion {
+    Criterion::default()
+        .warm_up_time(Duration::from_millis(300))
+        .measurement_time(Duration::from_secs(1))
+        .sample_size(10)
+}
+
+criterion_group! {
+    name = benches;
+    config = benchmark_config();
+    targets = bench_insert_one, bench_insert_one_90_duplicates, bench_contains, bench_remove, bench_range,
+        bench_multithreaded
+}
 criterion_main!(benches);
