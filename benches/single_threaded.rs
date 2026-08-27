@@ -1,14 +1,17 @@
+#[path = "single_threaded/map.rs"]
+mod map;
 #[path = "single_threaded/set.rs"]
 mod set;
 #[path = "value_generator.rs"]
 mod value_generator;
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use map::{IndexMap, StdMap};
 use set::{IndexSet, StdSet};
 use std::time::Duration;
 use value_generator::{
-    BenchValue, LargeRecord, ValueGenerator, DEFAULT_NODE_CAPACITY, NODE_CAPACITIES, RANGE_LEN, SET_SIZES,
-    SINGLE_OPERATION_BATCH_SIZE,
+    BenchMapValue, BenchValue, LargeMapValue, LargeRecord, MapInsertionKind, ValueGenerator, DEFAULT_NODE_CAPACITY,
+    NODE_CAPACITIES, RANGE_LEN, SET_SIZES, SINGLE_OPERATION_BATCH_SIZE,
 };
 
 fn bench_insert_one_scenario_for<T: BenchValue>(
@@ -133,6 +136,107 @@ fn bench_traversal(c: &mut Criterion) {
     bench_traversal_for::<LargeRecord>(c);
 }
 
+fn bench_map_insert_one_scenario_for<V: BenchMapValue>(c: &mut Criterion, scenario: &str, kind: MapInsertionKind) {
+    let mut group = c.benchmark_group(format!("single_map/insert_one/{}/{scenario}", V::ID));
+    group.throughput(Throughput::Elements(1));
+
+    for map_size in SET_SIZES {
+        map::bench_insert_one::<V, StdMap<V>>(
+            &mut group,
+            map_size,
+            DEFAULT_NODE_CAPACITY,
+            SINGLE_OPERATION_BATCH_SIZE,
+            kind,
+        );
+        for node_capacity in NODE_CAPACITIES {
+            map::bench_insert_one::<V, IndexMap<V>>(
+                &mut group,
+                map_size,
+                node_capacity,
+                SINGLE_OPERATION_BATCH_SIZE,
+                kind,
+            );
+        }
+    }
+
+    group.finish();
+}
+
+fn bench_map_insert_one(c: &mut Criterion) {
+    bench_map_insert_one_scenario_for::<u64>(c, "new", MapInsertionKind::New);
+    bench_map_insert_one_scenario_for::<u64>(c, "update", MapInsertionKind::Update);
+    bench_map_insert_one_scenario_for::<LargeMapValue>(c, "new", MapInsertionKind::New);
+    bench_map_insert_one_scenario_for::<LargeMapValue>(c, "update", MapInsertionKind::Update);
+}
+
+fn bench_map_get_for<V: BenchMapValue>(c: &mut Criterion) {
+    for hit in [true, false] {
+        let outcome = if hit { "hit" } else { "miss" };
+        let mut group = c.benchmark_group(format!("single_map/get/{}/{outcome}", V::ID));
+        group.throughput(Throughput::Elements(1));
+
+        for map_size in SET_SIZES {
+            map::bench_get::<V, StdMap<V>>(&mut group, map_size, DEFAULT_NODE_CAPACITY, hit);
+            for node_capacity in NODE_CAPACITIES {
+                map::bench_get::<V, IndexMap<V>>(&mut group, map_size, node_capacity, hit);
+            }
+        }
+
+        group.finish();
+    }
+}
+
+fn bench_map_get(c: &mut Criterion) {
+    bench_map_get_for::<u64>(c);
+    bench_map_get_for::<LargeMapValue>(c);
+}
+
+fn bench_map_remove_for<V: BenchMapValue>(c: &mut Criterion) {
+    let mut group = c.benchmark_group(format!("single_map/remove/{}/hit", V::ID));
+    group.throughput(Throughput::Elements(1));
+
+    for map_size in SET_SIZES {
+        map::bench_remove::<V, StdMap<V>>(&mut group, map_size, DEFAULT_NODE_CAPACITY);
+        for node_capacity in NODE_CAPACITIES {
+            map::bench_remove::<V, IndexMap<V>>(&mut group, map_size, node_capacity);
+        }
+    }
+
+    group.finish();
+}
+
+fn bench_map_remove(c: &mut Criterion) {
+    bench_map_remove_for::<u64>(c);
+    bench_map_remove_for::<LargeMapValue>(c);
+}
+
+fn bench_map_traversal_for<V: BenchMapValue>(c: &mut Criterion) {
+    let mut full_group = c.benchmark_group(format!("single_map/traversal/{}/full", V::ID));
+    for map_size in SET_SIZES {
+        full_group.throughput(Throughput::Elements(map_size as u64));
+        map::bench_traversal::<V, StdMap<V>>(&mut full_group, map_size, DEFAULT_NODE_CAPACITY);
+        for node_capacity in NODE_CAPACITIES {
+            map::bench_traversal::<V, IndexMap<V>>(&mut full_group, map_size, node_capacity);
+        }
+    }
+    full_group.finish();
+
+    let mut range_group = c.benchmark_group(format!("single_map/traversal/{}/range_128", V::ID));
+    range_group.throughput(Throughput::Elements(RANGE_LEN as u64));
+    for map_size in SET_SIZES {
+        map::bench_range::<V, StdMap<V>>(&mut range_group, map_size, DEFAULT_NODE_CAPACITY);
+        for node_capacity in NODE_CAPACITIES {
+            map::bench_range::<V, IndexMap<V>>(&mut range_group, map_size, node_capacity);
+        }
+    }
+    range_group.finish();
+}
+
+fn bench_map_traversal(c: &mut Criterion) {
+    bench_map_traversal_for::<u64>(c);
+    bench_map_traversal_for::<LargeMapValue>(c);
+}
+
 fn benchmark_config() -> Criterion {
     Criterion::default()
         .warm_up_time(Duration::from_millis(300))
@@ -144,6 +248,6 @@ criterion_group! {
     name = benches;
     config = benchmark_config();
     targets = bench_insert_one, bench_insert_one_90_percent_duplicates, bench_contains, bench_remove, bench_get_index,
-        bench_traversal
+        bench_traversal, bench_map_insert_one, bench_map_get, bench_map_remove, bench_map_traversal
 }
 criterion_main!(benches);

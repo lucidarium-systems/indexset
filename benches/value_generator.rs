@@ -1,6 +1,7 @@
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
+use std::fmt::Debug;
 
 pub const DEFAULT_NODE_CAPACITY: usize = 1_024;
 pub const NODE_CAPACITIES: [usize; 2] = [256, DEFAULT_NODE_CAPACITY];
@@ -14,6 +15,55 @@ pub trait BenchValue: Borrow<u64> + Clone + Ord + 'static {
 
     fn from_key(key: u64) -> Self;
     fn key(&self) -> u64;
+}
+
+pub trait BenchMapValue: Clone + Debug + Eq + 'static {
+    const ID: &'static str;
+
+    fn from_key(key: u64) -> Self;
+    fn updated_from_key(key: u64) -> Self;
+    fn checksum(&self) -> u64;
+}
+
+impl BenchMapValue for u64 {
+    const ID: &'static str = "entry_16b";
+
+    fn from_key(key: u64) -> Self {
+        key
+    }
+
+    fn updated_from_key(key: u64) -> Self {
+        !key
+    }
+
+    fn checksum(&self) -> u64 {
+        *self
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LargeMapValue([u64; 7]);
+
+impl BenchMapValue for LargeMapValue {
+    const ID: &'static str = "entry_64b";
+
+    fn from_key(key: u64) -> Self {
+        Self([key; 7])
+    }
+
+    fn updated_from_key(key: u64) -> Self {
+        Self([!key; 7])
+    }
+
+    fn checksum(&self) -> u64 {
+        self.0[0]
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum MapInsertionKind {
+    New,
+    Update,
 }
 
 impl BenchValue for u64 {
@@ -131,6 +181,31 @@ impl ValueGenerator {
             .take(SINGLE_OPERATION_BATCH_SIZE)
             .map(|key| (key / 2) as usize)
             .collect()
+    }
+
+    pub fn map_base_entries<V: BenchMapValue>(&self) -> Vec<(u64, V)> {
+        self.base_keys
+            .iter()
+            .copied()
+            .map(|key| (key, V::from_key(key)))
+            .collect()
+    }
+
+    pub fn map_insertions<V: BenchMapValue>(&self, amount: usize, kind: MapInsertionKind) -> Vec<(u64, V)> {
+        match kind {
+            MapInsertionKind::New => {
+                let mut keys = self.new_keys(amount);
+                keys.shuffle(&mut StdRng::seed_from_u64(SEED));
+                keys.into_iter().map(|key| (key, V::from_key(key))).collect()
+            }
+            MapInsertionKind::Update => self
+                .base_keys
+                .iter()
+                .take(amount)
+                .copied()
+                .map(|key| (key, V::updated_from_key(key)))
+                .collect(),
+        }
     }
 
     fn new_keys(&self, count: usize) -> Vec<u64> {
