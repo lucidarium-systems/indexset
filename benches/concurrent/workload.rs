@@ -1,4 +1,4 @@
-use crate::value_generator::{BenchValue, ValueGenerator, SEED};
+use crate::value_generator::{BenchMapValue, BenchValue, MapInsertionKind, ValueGenerator, SEED};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Barrier};
@@ -15,6 +15,113 @@ pub enum Scenario {
     InsertBatch90Duplicates,
     MixedUsual,
     MixedHot,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MapScenario {
+    InsertBatchNew,
+    InsertBatchUpdate,
+    MixedRead90Write10,
+    MixedRead50Write50,
+}
+
+impl MapScenario {
+    pub const ALL: [Self; 4] = [
+        Self::InsertBatchNew,
+        Self::InsertBatchUpdate,
+        Self::MixedRead90Write10,
+        Self::MixedRead50Write50,
+    ];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::InsertBatchNew => "insert_batch/new",
+            Self::InsertBatchUpdate => "insert_batch/update",
+            Self::MixedRead90Write10 => "mixed/read90_write10",
+            Self::MixedRead50Write50 => "mixed/read50_write50",
+        }
+    }
+
+    pub fn operation_count(self) -> usize {
+        match self {
+            Self::InsertBatchNew | Self::InsertBatchUpdate => INSERT_BATCH_COUNT,
+            Self::MixedRead90Write10 | Self::MixedRead50Write50 => MIXED_OPERATION_COUNT,
+        }
+    }
+
+    pub fn expected_successes(self) -> usize {
+        match self {
+            Self::InsertBatchNew => INSERT_BATCH_COUNT,
+            Self::InsertBatchUpdate => 0,
+            Self::MixedRead90Write10 | Self::MixedRead50Write50 => {
+                let (read_count, write_pair_count) = self.mixed_operation_counts();
+                read_count * MIXED_READ_HIT_PERCENT / 100 + write_pair_count * 2
+            }
+        }
+    }
+
+    pub fn expected_updates(self) -> usize {
+        match self {
+            Self::InsertBatchUpdate => INSERT_BATCH_COUNT,
+            Self::InsertBatchNew | Self::MixedRead90Write10 | Self::MixedRead50Write50 => 0,
+        }
+    }
+
+    pub fn expected_len(self, base_len: usize) -> usize {
+        match self {
+            Self::InsertBatchNew => base_len + INSERT_BATCH_COUNT,
+            Self::InsertBatchUpdate | Self::MixedRead90Write10 | Self::MixedRead50Write50 => base_len,
+        }
+    }
+
+    pub fn needs_fresh_map(self) -> bool {
+        matches!(self, Self::InsertBatchNew | Self::InsertBatchUpdate)
+    }
+
+    fn reads_per_block(self) -> usize {
+        match self {
+            Self::MixedRead90Write10 => 18,
+            Self::MixedRead50Write50 => 2,
+            Self::InsertBatchNew | Self::InsertBatchUpdate => 0,
+        }
+    }
+
+    fn mixed_operation_counts(self) -> (usize, usize) {
+        let reads_per_block = self.reads_per_block();
+        let block_count = MIXED_OPERATION_COUNT / (reads_per_block + 2);
+        (block_count * reads_per_block, block_count)
+    }
+
+    pub fn validate_operations<V: BenchMapValue>(self, shards: &[Vec<MapOperation<V>>], thread_count: usize) {
+        assert_eq!(shards.len(), thread_count);
+        assert!(shards.iter().all(|shard| !shard.is_empty()));
+
+        let actual = MapWorkloadShape::from_shards(shards);
+        let expected = match self {
+            Self::InsertBatchNew => MapWorkloadShape {
+                inserts: INSERT_BATCH_COUNT,
+                odd_inserts: INSERT_BATCH_COUNT,
+                ..MapWorkloadShape::default()
+            },
+            Self::InsertBatchUpdate => MapWorkloadShape {
+                inserts: INSERT_BATCH_COUNT,
+                ..MapWorkloadShape::default()
+            },
+            Self::MixedRead90Write10 | Self::MixedRead50Write50 => {
+                let (gets, write_pair_count) = self.mixed_operation_counts();
+                MapWorkloadShape {
+                    gets,
+                    get_hits: gets * MIXED_READ_HIT_PERCENT / 100,
+                    inserts: write_pair_count,
+                    removes: write_pair_count,
+                    ..MapWorkloadShape::default()
+                }
+            }
+        };
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual.operation_count(), self.operation_count());
+    }
 }
 
 impl Scenario {
@@ -153,10 +260,53 @@ impl WorkloadShape {
     }
 }
 
+#[derive(Clone)]
+pub enum MapOperation<V> {
+    Get(u64),
+    Insert(u64, V),
+    Remove(u64),
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct MapWorkloadShape {
+    gets: usize,
+    get_hits: usize,
+    inserts: usize,
+    odd_inserts: usize,
+    removes: usize,
+}
+
+impl MapWorkloadShape {
+    fn from_shards<V>(shards: &[Vec<MapOperation<V>>]) -> Self {
+        let mut shape = Self::default();
+
+        for operation in shards.iter().flatten() {
+            match operation {
+                MapOperation::Get(key) => {
+                    shape.gets += 1;
+                    shape.get_hits += usize::from(key % 2 == 0);
+                }
+                MapOperation::Insert(key, _) => {
+                    shape.inserts += 1;
+                    shape.odd_inserts += usize::from(key % 2 == 1);
+                }
+                MapOperation::Remove(_) => shape.removes += 1,
+            }
+        }
+
+        shape
+    }
+
+    fn operation_count(&self) -> usize {
+        self.gets + self.inserts + self.removes
+    }
+}
+
 #[derive(Default)]
 pub struct WorkerStats {
     pub operations: usize,
     pub successes: usize,
+    pub updates: usize,
     pub checksum: u64,
 }
 
@@ -164,6 +314,7 @@ impl WorkerStats {
     fn merge(&mut self, other: Self) {
         self.operations += other.operations;
         self.successes += other.successes;
+        self.updates += other.updates;
         self.checksum ^= other.checksum;
     }
 }
@@ -200,6 +351,34 @@ pub fn operations<T: BenchValue>(scenario: Scenario, set_size: usize, thread_cou
         ),
         Scenario::MixedUsual | Scenario::MixedHot => {
             mixed_operations(set_size, thread_count, scenario.reads_per_block())
+        }
+    }
+}
+
+pub fn map_operations<V: BenchMapValue>(
+    scenario: MapScenario,
+    map_size: usize,
+    thread_count: usize,
+) -> Vec<Vec<MapOperation<V>>> {
+    match scenario {
+        MapScenario::InsertBatchNew => shard_operations(
+            ValueGenerator::new(map_size)
+                .map_insertions(INSERT_BATCH_COUNT, MapInsertionKind::New)
+                .into_iter()
+                .map(|(key, value)| MapOperation::Insert(key, value))
+                .collect(),
+            thread_count,
+        ),
+        MapScenario::InsertBatchUpdate => shard_operations(
+            ValueGenerator::new(map_size)
+                .map_insertions(INSERT_BATCH_COUNT, MapInsertionKind::Update)
+                .into_iter()
+                .map(|(key, value)| MapOperation::Insert(key, value))
+                .collect(),
+            thread_count,
+        ),
+        MapScenario::MixedRead90Write10 | MapScenario::MixedRead50Write50 => {
+            map_mixed_operations(map_size, thread_count, scenario.reads_per_block())
         }
     }
 }
@@ -295,7 +474,45 @@ fn mixed_operations<T: BenchValue>(
     shards
 }
 
-fn shard_operations<T>(operations: Vec<Operation<T>>, thread_count: usize) -> Vec<Vec<Operation<T>>> {
+fn map_mixed_operations<V: BenchMapValue>(
+    map_size: usize,
+    thread_count: usize,
+    reads_per_block: usize,
+) -> Vec<Vec<MapOperation<V>>> {
+    let block_len = reads_per_block + 2;
+    let block_count = MIXED_OPERATION_COUNT / block_len;
+    let mut base_keys = ValueGenerator::new(map_size).base_values::<u64>();
+    let mutation_key_count = block_count.min(map_size / 2);
+    let read_keys = base_keys.split_off(mutation_key_count);
+    let mutation_keys = base_keys;
+    let mut shards = empty_shards(thread_count);
+    let mut rng = StdRng::seed_from_u64(SEED ^ reads_per_block as u64);
+    let mut read_index = 0;
+
+    for block in 0..block_count {
+        let mutation_index = block % mutation_keys.len();
+        let mutation_key = mutation_keys[mutation_index];
+        let shard = mutation_index % thread_count;
+        let mutation_position = rng.random_range(0..=reads_per_block);
+
+        for position in 0..=reads_per_block {
+            if position == mutation_position {
+                shards[shard].push(MapOperation::Remove(mutation_key));
+                shards[shard].push(MapOperation::Insert(mutation_key, V::from_key(mutation_key)));
+            }
+            if position < reads_per_block {
+                let hit = read_index % 10 != 9;
+                let key = read_keys[rng.random_range(0..read_keys.len())] + u64::from(!hit);
+                shards[shard].push(MapOperation::Get(key));
+                read_index += 1;
+            }
+        }
+    }
+
+    shards
+}
+
+fn shard_operations<T>(operations: Vec<T>, thread_count: usize) -> Vec<Vec<T>> {
     let mut shards = empty_shards(thread_count);
     for (index, operation) in operations.into_iter().enumerate() {
         shards[index % thread_count].push(operation);
