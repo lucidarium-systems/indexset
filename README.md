@@ -66,58 +66,96 @@ The following hold:
 
 ## Benchmarks
 
-The following numbers were obtained on a M3 macbook pro:
+### Running the suite
 
-### Single-threaded
+| Target | Command | Coverage |
+|--------|---------|----------|
+| Single-threaded set and map | `cargo bench --bench single_threaded` | `indexset` and `std::collections` |
+| Concurrent set and map | `cargo bench --bench concurrent --features concurrent` | Concurrent trees and mutex-protected single-threaded baselines |
+| Concurrent set, map, and multimap | `cargo bench --bench concurrent --features multimap` | Adds random- and ordered-discriminator multimap workloads |
+| Concurrent map alternatives | `cargo bench --bench comparison --features concurrent` | `indexset`, WorkTablesIndex, Arctic, and raw Congee maps |
 
-Command: `cargo bench --bench stdlib --all-features`
+### Method and units
 
-* Inserting 100k random usize
-  * `stdlib::collections::BTreeSet.insert(i)`: 8.9ms
-  * `indexset::BTreeSet.insert(i)`: 13.1ms
-  * `indexset::concurrent::set::BTreeSet.insert(i)`: 14.0ms
-* Checking that each 100k random usize integers exist
-  * `stdlib::collections::BTreeSet.contains(i)`: 7.02ms
-  * `indexset::BTreeSet.contains(i)`: 5.22ms
-  * `indexset::concurrent::set::BTreeSet.contains(i)`: 5.27ms
-* Getting all 100k i-th elements
-  * `stdlib::collections::BTreeSet.iter.nth(i)`: **13.28s** yes, seconds! 
-  * `indexset::BTreeSet.get_index(i)`: **3.93ms**
-* Iterating over all 100k elements and then collecting it into a vec
-  * `Vec::from_iter(stdlib::collections::BTreeSet.iter())`: **227.28us**
-  * `Vec::from_iter(indexset::BTreeSet.iter())`: **123.21.us**
+The representative results below are Criterion median point estimates from commit `7e3ac23`, measured on
+2026-08-26 on a 12-core Apple M2 Pro with 16 GB RAM, macOS 26.5.2, and
+`rustc 1.97.0-nightly (ad3a598ca 2026-05-03)`. Lower is better.
+The lowest comparable result for each workload or scenario is shown in **bold**.
 
-Getting the i-th element is **3400x** faster than stdlib's btree, `contains` is 25% faster, and iterating is twice 
-as fast, at the cost of insertions being 30% slower.
+### Single-threaded results
 
-If your use case of `std::collections::BTreeSet` and `BTreeMap` is read-heavy, or if you really need to index by
-sorted-order position, it might be worth checking out `indexset` instead.
+The set cases use either an 8-byte `u64` or a 64-byte record and start with 100,000 existing values:
 
-### Concurrent
+| Workload | Value | `std::collections::BTreeSet` | `indexset`, cap 256 | `indexset`, cap 1024 |
+|----------|-------|------------------------------|---------------------|----------------------|
+| Insert a new value | `u64` (8 B) | 144.9 ns | **134.6 ns** | 168.1 ns |
+| | `record_64b` (64 B) | **230.0 ns** | 264.3 ns | 564.3 ns |
+| `contains` hit | `u64` (8 B) | **21.8 ns** | 23.9 ns | 23.6 ns |
+| | `record_64b` (64 B) | **27.8 ns** | 31.2 ns | 33.1 ns |
+| Remove hit | `u64` (8 B) | **69.6 ns** | 133.1 ns | 163.1 ns |
+| | `record_64b` (64 B) | **97.6 ns** | 254.5 ns | 578.5 ns |
+| `get_index` | `u64` (8 B) | N/A | 13.2 ns | **11.0 ns** |
+| | `record_64b` (64 B) | N/A | 13.2 ns | **11.1 ns** |
+| Full traversal | `u64` (8 B) | 92.5 µs | 37.5 µs | **37.3 µs** |
+| | `record_64b` (64 B) | 108.2 µs | 63.1 µs | **61.4 µs** |
+| 128-entry range traversal | `u64` (8 B) | 164.8 ns | 127.4 ns | **117.3 ns** |
+| | `record_64b` (64 B) | 168.4 ns | 129.5 ns | **122.5 ns** |
 
-Command: `cargo bench --bench concurrent --all-features`
+The map cases use either a 16-byte `u64 -> u64` entry or a 64-byte entry with a 56-byte value and start with
+100,000 existing entries:
 
-We benchmark concurrent operations with 40 threads, each conducting 100000 operations
-at the same time that vary from a ratio of 1% writes/reads to 50% writes/reads.
+| Workload | Entry | `std::collections::BTreeMap` | `indexset`, cap 256 | `indexset`, cap 1024 |
+|----------|-------|------------------------------|---------------------|----------------------|
+| Insert a new entry | `entry_16b` (16 B) | 178.5 ns | **152.5 ns** | 223.7 ns |
+| | `entry_64b` (64 B) | 298.3 ns | **271.8 ns** | 563.0 ns |
+| Update an existing entry | `entry_16b` (16 B) | 67.4 ns | 49.4 ns | **44.0 ns** |
+| | `entry_64b` (64 B) | 77.2 ns | 75.3 ns | **66.0 ns** |
+| `get` hit | `entry_16b` (16 B) | **24.7 ns** | 46.5 ns | 38.7 ns |
+| | `entry_64b` (64 B) | **29.1 ns** | 51.0 ns | 40.5 ns |
+| Remove hit | `entry_16b` (16 B) | **75.0 ns** | 153.4 ns | 224.3 ns |
+| | `entry_64b` (64 B) | **117.0 ns** | 262.8 ns | 587.5 ns |
+| Full traversal | `entry_16b` (16 B) | 89.9 µs | 59.7 µs | **59.6 µs** |
+| | `entry_64b` (64 B) | 110.0 µs | 66.3 µs | **62.7 µs** |
+| 128-entry range traversal | `entry_16b` (16 B) | 163.8 ns | 155.6 ns | **139.0 ns** |
+| | `entry_64b` (64 B) | 163.4 ns | 165.0 ns | **148.5 ns** |
 
-In this benchmark threads have high locality and tend to focus on specific parts of the data.
+### Concurrent results
 
-* 1% writes/99% reads:
-  * `indexset::concurrent::set::BTreeSet`: 170.5ms
-  * `scc::TreeIndex`: 128.7ms
-  * `crossbeam_skiplist::SkipSet`: 161.3ms
-* 10% writes/90% reads:
-  * `indexset::concurrent::set::BTreeSet`: 175.9ms
-  * `scc::TreeIndex`: 183.9ms
-  * `crossbeam_skiplist::SkipSet`: 217.4ms
-* 30% writes/70% reads:
-  * `indexset::concurrent::set::BTreeSet`: 190.9ms
-  * `scc::TreeIndex`: 313.2ms
-  * `crossbeam_skiplist::SkipSet`: 261.8ms
-* 50% writes/50% reads:
-  * `indexset::concurrent::set::BTreeSet`: 220.75ms
-  * `scc::TreeIndex`: 561.70ms
-  * `crossbeam_skiplist::SkipSet`: 334.40ms
+The following set results measure 10,000 operations over 12 worker threads and 100,000 existing values:
+
+| Implementation | 90/10, 8 B | 90/10, 64 B | 50/50, 8 B | 50/50, 64 B |
+|----------------|------------:|-------------:|------------:|-------------:|
+| Concurrent `indexset`, cap 256 | **0.531 ms** | **0.593 ms** | **0.548 ms** | **0.728 ms** |
+| Concurrent `indexset`, cap 1024 | 0.584 ms | 1.811 ms | 0.697 ms | 4.011 ms |
+| Mutex-protected `indexset`, cap 256 | 1.798 ms | 2.989 ms | 2.913 ms | 6.239 ms |
+| Mutex-protected `indexset`, cap 1024 | 2.024 ms | 9.801 ms | 3.829 ms | 35.458 ms |
+| Mutex-protected `std::collections::BTreeSet` | 1.496 ms | 1.913 ms | 1.886 ms | 2.545 ms |
+
+The map target uses the same operation count, thread count, and initial length:
+
+| Implementation | 90/10, 16 B | 90/10, 64 B | 50/50, 16 B | 50/50, 64 B |
+|----------------|-------------:|-------------:|-------------:|-------------:|
+| Concurrent `indexset`, cap 256 | **0.562 ms** | **0.593 ms** | **0.581 ms** | **0.722 ms** |
+| Concurrent `indexset`, cap 1024 | 0.659 ms | 1.829 ms | 0.790 ms | 3.945 ms |
+| Mutex-protected `indexset`, cap 256 | 2.341 ms | 3.216 ms | 4.150 ms | 6.272 ms |
+| Mutex-protected `indexset`, cap 1024 | 2.637 ms | 10.461 ms | 5.292 ms | 35.900 ms |
+| Mutex-protected `std::collections::BTreeMap` | 1.642 ms | 1.795 ms | 1.969 ms | 2.314 ms |
+
+### Multimap results
+
+These multimap results use 100,000 pairs, node capacity `1024 `. `v8b` combines with an 8-byte key into a 16-byte pair; `v56b` produces a 64-byte pair. A hit query
+iterates and checksums every value for its key, so dense fanout is expected to cost more than sparse fanout.
+
+| Pair discriminator | Pair | Insert new, fanout 1-3 | Insert new, fanout 1,000-2,000 | Get hit, fanout 1-3 | Get hit, fanout 1,000-2,000 |
+|--------------------|------|------------------------|--------------------------------|---------------------|-----------------------------|
+| Random | `v8b` (16 B) | 322.9 ns | 295.8 ns | **648.9 ns** | 7.146 µs |
+| | `v56b` (64 B) | 718.3 ns | 707.3 ns | **849.6 ns** | **7.749 µs** |
+| Ordered | `v8b` (16 B) | **248.6 ns** | **209.6 ns** | 736.1 ns | **6.035 µs** |
+| | `v56b` (64 B) | **610.7 ns** | **569.5 ns** | 1.694 µs | 8.390 µs |
+
+Dense ordered mixed workloads are currently excluded pending
+[`issue #68`](https://github.com/lucidarium-systems/indexset/issues/68); the remaining multimap cases retain
+their correctness checks during benchmark execution.
 
 ## Limitations
 

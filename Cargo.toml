@@ -12,6 +12,9 @@ categories = ["data-structures"]
 readme = "README.md"
 
 [dev-dependencies]
+WorkTablesIndex = { version = "=0.0.5", features = ["concurrent"] }
+arctic-wt = "=0.1.5"
+congee-wt = "=0.4.2"
 criterion = { version = "0.5.1", features = ["html_reports"] }
 rand = "0.9.0"
 scc = { version = "2.2.5" }
@@ -47,5 +50,10 @@ harness = false
 
 [[bench]]
 name = "concurrent"
+harness = false
+required-features = ["concurrent"]
+
+[[bench]]
+name = "comparison"
 harness = false
 required-features = ["concurrent"]

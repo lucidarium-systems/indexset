@@ -441,6 +441,76 @@ where
     (elapsed, stats)
 }
 
+#[allow(dead_code)]
+pub fn run_parallel_with_context<C, O, W, I, F>(
+    collection: Arc<C>,
+    operation_shards: Vec<Vec<O>>,
+    initialize: I,
+    apply: F,
+) -> (Duration, WorkerStats)
+where
+    C: Send + Sync + 'static,
+    O: Send + 'static,
+    I: Fn(&C) -> W + Send + Sync + 'static,
+    F: Fn(&C, &mut W, O, &mut WorkerStats) + Send + Sync + 'static,
+{
+    let worker_count = operation_shards.len();
+    let ready_barrier = Arc::new(Barrier::new(worker_count + 1));
+    let start_barrier = Arc::new(Barrier::new(worker_count + 1));
+    let finish_barrier = Arc::new(Barrier::new(worker_count + 1));
+    let release_barrier = Arc::new(Barrier::new(worker_count + 1));
+    let initialize = Arc::new(initialize);
+    let apply = Arc::new(apply);
+    let mut handles = Vec::with_capacity(worker_count);
+
+    for operations in operation_shards {
+        let collection = Arc::clone(&collection);
+        let ready_barrier = Arc::clone(&ready_barrier);
+        let start_barrier = Arc::clone(&start_barrier);
+        let finish_barrier = Arc::clone(&finish_barrier);
+        let release_barrier = Arc::clone(&release_barrier);
+        let initialize = Arc::clone(&initialize);
+        let apply = Arc::clone(&apply);
+        handles.push(thread::spawn(move || {
+            let mut operations = operations.into_iter();
+            let mut context = initialize(collection.as_ref());
+            ready_barrier.wait();
+            start_barrier.wait();
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                let mut stats = WorkerStats::default();
+                for operation in operations.by_ref() {
+                    apply(collection.as_ref(), &mut context, operation, &mut stats);
+                }
+                stats
+            }));
+            finish_barrier.wait();
+            // Worker context teardown can unpin epochs or free buffers, so release it after timing.
+            release_barrier.wait();
+            drop(context);
+            (result, operations)
+        }));
+    }
+
+    ready_barrier.wait();
+    let start = Instant::now();
+    start_barrier.wait();
+    finish_barrier.wait();
+    let elapsed = start.elapsed();
+    release_barrier.wait();
+
+    let mut stats = WorkerStats::default();
+    for handle in handles {
+        let (result, operations) = handle.join().expect("benchmark worker should join");
+        match result {
+            Ok(worker_stats) => stats.merge(worker_stats),
+            Err(payload) => resume_unwind(payload),
+        }
+        drop(operations);
+    }
+
+    (elapsed, stats)
+}
+
 fn mixed_operations<T: BenchValue>(
     set_size: usize,
     thread_count: usize,
