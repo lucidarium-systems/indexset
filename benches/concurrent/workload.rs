@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 pub const INSERT_BATCH_COUNT: usize = 1_024;
 pub const MIXED_OPERATION_COUNT: usize = 10_000;
 const MIXED_READ_HIT_PERCENT: usize = 90;
+const MAX_BENCHMARK_THREAD_COUNT: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Scenario {
@@ -307,6 +308,7 @@ pub struct WorkerStats {
     pub operations: usize,
     pub successes: usize,
     pub updates: usize,
+    pub validations: usize,
     pub checksum: u64,
 }
 
@@ -315,12 +317,15 @@ impl WorkerStats {
         self.operations += other.operations;
         self.successes += other.successes;
         self.updates += other.updates;
+        self.validations += other.validations;
         self.checksum ^= other.checksum;
     }
 }
 
 pub fn maximum_thread_count() -> usize {
-    thread::available_parallelism().map_or(1, usize::from)
+    thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(MAX_BENCHMARK_THREAD_COUNT)
 }
 
 pub fn thread_counts() -> Vec<usize> {
