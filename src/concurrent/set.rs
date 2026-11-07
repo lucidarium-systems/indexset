@@ -583,9 +583,28 @@ where
     current_back_node: Option<Arc<Mutex<Node>>>,
     current_back_node_guard: Option<ArcMutexGuard<RawMutex, Node>>,
     current_back_node_iter: Option<std::slice::Iter<'a, T>>,
-    current_front_value: Option<T>,
-    current_back_value: Option<T>,
+    // Everything left to yield lies between these bounds
+    current_front_value: Bound<T>,
+    current_back_value: Bound<T>,
     met: bool,
+}
+
+// Whether `value` lies after everything up to `bound`.
+fn is_after<T: Ord>(value: &T, bound: &Bound<T>) -> bool {
+    match bound {
+        Bound::Included(bound) => value > bound,
+        Bound::Excluded(bound) => value >= bound,
+        Bound::Unbounded => false,
+    }
+}
+
+// Whether `value` lies before everything from `bound` on.
+fn is_before<T: Ord>(value: &T, bound: &Bound<T>) -> bool {
+    match bound {
+        Bound::Included(bound) => value < bound,
+        Bound::Excluded(bound) => value <= bound,
+        Bound::Unbounded => false,
+    }
 }
 
 impl<'a, T, Node> Iter<'a, T, Node>
@@ -604,8 +623,8 @@ where
             current_back_node,
             current_back_node_guard: None,
             current_back_node_iter: None,
-            current_front_value: None,
-            current_back_value: None,
+            current_front_value: Bound::Unbounded,
+            current_back_value: Bound::Unbounded,
             met: false,
         }
     }
@@ -665,13 +684,11 @@ where
 
             if let Some(iter) = self.current_front_node_iter.as_mut() {
                 if let Some(value) = iter.next() {
-                    if let Some(current_back_value) = self.current_back_value.as_ref() {
-                        if value.ge(current_back_value) {
-                            self.met = true;
-                            return None;
-                        }
+                    if is_after(value, &self.current_back_value) {
+                        self.met = true;
+                        return None;
                     }
-                    self.current_front_value = Some(value.clone());
+                    self.current_front_value = Bound::Excluded(value.clone());
                     return Some(value);
                 } else {
                     self.current_front_node_iter = None;
@@ -738,24 +755,19 @@ where
                     )
                 });
 
-                if let Some(current_front_value) = self.current_front_value.as_ref() {
-                    let g = self.current_front_node_guard.as_mut().expect("was just set before");
-                    if let Some(rank) = g.rank(Bound::Excluded(current_front_value), true) {
-                        let i = self.current_front_node_iter.as_mut().expect("was just set before");
-                        if let Some(v) = i.nth(rank + 1) {
-                            if let Some(current_back_value) = self.current_back_value.as_ref() {
-                                if v.ge(current_back_value) {
-                                    self.met = true;
-                                    return None;
-                                }
-                            }
-                            self.current_front_value = Some(v.clone());
-                            return Some(v);
+                let g = self.current_front_node_guard.as_mut().expect("was just set before");
+                if let Some(rank) = g.rank(self.current_front_value.as_ref(), true) {
+                    let i = self.current_front_node_iter.as_mut().expect("was just set before");
+                    if let Some(v) = i.nth(rank + 1) {
+                        if is_after(v, &self.current_back_value) {
+                            self.met = true;
+                            return None;
                         }
+                        self.current_front_value = Bound::Excluded(v.clone());
+                        return Some(v);
                     }
-                    // else iter is exhausted, will continue in next loop iteration.
-                    continue;
                 }
+                // else iter is exhausted, will continue in next loop iteration.
             }
         }
     }
@@ -809,13 +821,11 @@ where
 
             if let Some(iter) = self.current_back_node_iter.as_mut() {
                 if let Some(value) = iter.next_back() {
-                    if let Some(current_front_value) = self.current_front_value.as_ref() {
-                        if value.le(current_front_value) {
-                            self.met = true;
-                            return None;
-                        }
+                    if is_before(value, &self.current_front_value) {
+                        self.met = true;
+                        return None;
                     }
-                    self.current_back_value = Some(value.clone());
+                    self.current_back_value = Bound::Excluded(value.clone());
                     return Some(value);
                 } else {
                     self.current_back_node_iter = None;
@@ -873,24 +883,19 @@ where
                     )
                 });
 
-                if let Some(current_back_value) = self.current_back_value.as_ref() {
-                    let g = self.current_back_node_guard.as_mut().expect("was just set before");
-                    if let Some(rank) = g.rank(Bound::Excluded(current_back_value), false) {
-                        let i = self.current_back_node_iter.as_mut().expect("was just set before");
-                        if let Some(v) = i.nth_back(rank + 1) {
-                            if let Some(current_front_value) = self.current_front_value.as_ref() {
-                                if v.le(current_front_value) {
-                                    self.met = true;
-                                    return None;
-                                }
-                            }
-                            self.current_back_value = Some(v.clone());
-                            return Some(v);
+                let g = self.current_back_node_guard.as_mut().expect("was just set before");
+                if let Some(rank) = g.rank(self.current_back_value.as_ref(), false) {
+                    let i = self.current_back_node_iter.as_mut().expect("was just set before");
+                    if let Some(v) = i.nth_back(rank + 1) {
+                        if is_before(v, &self.current_front_value) {
+                            self.met = true;
+                            return None;
                         }
+                        self.current_back_value = Bound::Excluded(v.clone());
+                        return Some(v);
                     }
-                    // else iter is exhausted, will continue in next loop iteration.
-                    continue;
                 }
+                // else iter is exhausted, will continue in next loop iteration.
             }
         }
     }
@@ -933,112 +938,106 @@ where
     {
         let _global_guard = btree.index_lock.read();
 
-        let mut met = false;
-
-        let start_bound = range.start_bound();
-        let current_front_entry = btree.index.lower_bound(start_bound);
-
-        let front_value = if let Some(front_entry) = current_front_entry.as_ref() {
-            let front_guard = front_entry.value().lock_arc();
-            if let Some(rank) = match start_bound {
-                Bound::Included(v) => front_guard.rank(Bound::Included(v), true),
-                Bound::Excluded(v) => front_guard.rank(Bound::Excluded(v), true),
-                Bound::Unbounded => None,
-            } {
-                let mut front_iter = front_guard.iter();
-                let front_value = front_iter.nth(rank).cloned();
-                drop(front_guard);
-
-                front_value
-            } else if let Some(pre_front_entry) = front_entry.prev() {
-                let pre_front_guard = pre_front_entry.value().lock_arc();
-                let front_value = pre_front_guard.iter().last().cloned();
-                drop(pre_front_guard);
-
-                front_value
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let end_bound = range.end_bound();
-        let current_back_entry = btree
+        // Values past the last key can still be in the last node, just like on removals
+        let front_entry = btree
             .index
-            .upper_bound(end_bound)
-            .and_then(|e| e.next().or_else(|| btree.index.back()))
-            .or_else(|| btree.index.front());
-
-        let back_value = if let Some(back_entry) = current_back_entry.as_ref() {
-            let back_guard = back_entry.value().lock_arc();
-            if let Some(rank) = match end_bound {
-                Bound::Included(v) => back_guard.rank(Bound::Included(v), false),
-                Bound::Excluded(v) => back_guard.rank(Bound::Excluded(v), false),
-                Bound::Unbounded => None,
-            } {
-                let mut back_iter = back_guard.iter();
-                let back_value = back_iter.nth_back(rank).cloned();
-                drop(back_guard);
-
-                back_value
-            } else if let Some(prev_back_entry) = back_entry.next() {
-                let prev_back_guard = prev_back_entry.value().lock_arc();
-                let back_value = prev_back_guard.iter().next().cloned();
-                drop(prev_back_guard);
-
-                back_value
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        if front_value.is_none() && back_value.is_none() {
-            // in this case we iter full or no iter at all
-            if start_bound != Bound::Unbounded || end_bound != Bound::Unbounded {
-                if let Some(max) = btree.index.back().and_then(|e| e.value().lock_arc().max().cloned()) {
-                    if let Bound::Included(v) = start_bound {
-                        if v > max.borrow() {
-                            met = true;
-                        }
-                    } else if let Bound::Excluded(v) = start_bound {
-                        if v >= max.borrow() {
-                            met = true;
-                        }
-                    }
-                }
-
-                if let Some(min) = btree.index.front().and_then(|e| e.value().lock_arc().min().cloned()) {
-                    if let Bound::Included(v) = end_bound {
-                        if v < min.borrow() {
-                            met = true;
-                        }
-                    } else if let Bound::Excluded(v) = end_bound {
-                        if v <= min.borrow() {
-                            met = true;
-                        }
-                    }
-                }
-            }
+            .lower_bound(range.start_bound())
+            .or_else(|| btree.index.back());
+        // Many values can be equal to the end bound, so the search starts past all of them
+        let back_entry = match range.end_bound() {
+            Bound::Included(bound) => btree.index.lower_bound(Bound::Excluded(bound)),
+            Bound::Excluded(bound) => btree.index.lower_bound(Bound::Included(bound)),
+            Bound::Unbounded => None,
         }
+        .or_else(|| btree.index.back());
+
+        // The range iterates between its first and last values when it is created instead of its
+        // bounds, so values inserted concurrently outside of it are never reached.
+        let (front, back, met) = match (
+            first_value_within(front_entry, range.start_bound()),
+            last_value_within(back_entry, range.end_bound()),
+        ) {
+            (Some((front_node, front_value)), Some((back_node, back_value))) if front_value <= back_value => (
+                (Some(front_node), Bound::Included(front_value)),
+                (Some(back_node), Bound::Included(back_value)),
+                false,
+            ),
+            _ => ((None, Bound::Unbounded), (None, Bound::Unbounded), true),
+        };
 
         Self {
             iter: Iter {
                 tree: btree,
-                current_front_node: current_front_entry.map(|e| e.value().clone()),
+                current_front_node: front.0,
                 current_front_node_guard: None,
                 current_front_node_iter: None,
-                current_back_node: current_back_entry.map(|e| e.value().clone()),
+                current_back_node: back.0,
                 current_back_node_guard: None,
                 current_back_node_iter: None,
-                current_front_value: front_value,
-                current_back_value: back_value,
+                current_front_value: front.1,
+                current_back_value: back.1,
                 met,
             },
         }
     }
+}
+
+// Returns the first value within `bound` and its node, searching forwards from `entry`.
+fn first_value_within<T, Node, Q>(
+    mut entry: Option<crossbeam_skiplist::map::Entry<'_, T, Arc<Mutex<Node>>>>,
+    bound: Bound<&Q>,
+) -> Option<(Arc<Mutex<Node>>, T)>
+where
+    T: Ord + Clone + Borrow<Q> + Send + 'static,
+    Node: NodeLike<T>,
+    Q: Ord + ?Sized,
+{
+    while let Some(current_entry) = entry {
+        let node = current_entry.value().lock();
+        let values = node.iter().as_slice();
+        let position = match bound {
+            Bound::Included(bound) => values.partition_point(|value| value.borrow() < bound),
+            Bound::Excluded(bound) => values.partition_point(|value| value.borrow() <= bound),
+            Bound::Unbounded => 0,
+        };
+        if let Some(value) = values.get(position) {
+            return Some((current_entry.value().clone(), value.clone()));
+        }
+
+        drop(node);
+        entry = current_entry.next();
+    }
+
+    None
+}
+
+// Returns the last value within `bound` and its node, searching backwards from `entry`.
+fn last_value_within<T, Node, Q>(
+    mut entry: Option<crossbeam_skiplist::map::Entry<'_, T, Arc<Mutex<Node>>>>,
+    bound: Bound<&Q>,
+) -> Option<(Arc<Mutex<Node>>, T)>
+where
+    T: Ord + Clone + Borrow<Q> + Send + 'static,
+    Node: NodeLike<T>,
+    Q: Ord + ?Sized,
+{
+    while let Some(current_entry) = entry {
+        let node = current_entry.value().lock();
+        let values = node.iter().as_slice();
+        let position = match bound {
+            Bound::Included(bound) => values.partition_point(|value| value.borrow() <= bound),
+            Bound::Excluded(bound) => values.partition_point(|value| value.borrow() < bound),
+            Bound::Unbounded => values.len(),
+        };
+        if position > 0 {
+            return Some((current_entry.value().clone(), values[position - 1].clone()));
+        }
+
+        drop(node);
+        entry = current_entry.prev();
+    }
+
+    None
 }
 
 impl<'a, T, Node> Iterator for Range<'a, T, Node>
@@ -1113,6 +1112,9 @@ where
     /// `range((Excluded(4), Included(10)))` will yield a left-exclusive, right-inclusive
     /// range from 4 to 10.
     ///
+    /// Values inserted while the iterator is in use are only yielded if they lie between the first
+    /// and last values that were in the range when it was created.
+    ///
     /// # Panics
     ///
     /// Panics if range `start > end`.
@@ -1165,9 +1167,11 @@ where
             return;
         };
         // The back node holds the last value to remove, which is in the last node if the range
-        // ends past every value
+        // ends past every value. Many values can be equal to the end bound, so it is searched for
+        // past all of them.
         let back_entry = match range.end_bound() {
-            Bound::Included(bound) | Bound::Excluded(bound) => self.index.lower_bound(Bound::Included(bound)),
+            Bound::Included(bound) => self.index.lower_bound(Bound::Excluded(bound)),
+            Bound::Excluded(bound) => self.index.lower_bound(Bound::Included(bound)),
             Bound::Unbounded => None,
         }
         .or_else(|| self.index.back())
@@ -1822,6 +1826,31 @@ mod tests {
             set.insert(i);
         }
         handle.join().unwrap();
+    }
+
+    // Regression for https://github.com/lucidarium-systems/indexset/issues/68.
+    #[test]
+    fn test_range_ignores_values_inserted_outside_of_it() {
+        // A range does not lock anything until it is advanced, so these inserts happen while it
+        // is in use.
+        let set = BTreeSet::<u64>::from_iter([1, 3, 7, 9]);
+
+        let range = set.range(..=5);
+        set.insert(6);
+        assert_eq!(range.copied().collect::<Vec<_>>(), vec![1, 3]);
+
+        let range = set.range(5..);
+        set.insert(4);
+        assert_eq!(range.copied().collect::<Vec<_>>(), vec![6, 7, 9]);
+
+        let range = set.range(..=20);
+        set.insert(50);
+        assert_eq!(range.copied().collect::<Vec<_>>(), vec![1, 3, 4, 6, 7, 9]);
+
+        let range = set.range(5..=8);
+        set.insert(2);
+        set.insert(10);
+        assert_eq!(range.rev().copied().collect::<Vec<_>>(), vec![7, 6]);
     }
 
     #[test]

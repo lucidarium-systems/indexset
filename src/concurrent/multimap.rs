@@ -228,6 +228,9 @@ where
     }
     /// Constructs a double-ended iterator over all key value pairs with the given key in the map.
     ///
+    /// Pairs inserted while the iterator is in use are only yielded if they lie between the first
+    /// and last pairs with the key when it was created.
+    ///
     /// ```
     /// use indexset::concurrent::multimap::BTreeMultiMap;
     /// use indexset::BTreeSet;
@@ -439,6 +442,9 @@ where
     /// `range((Excluded(4), Included(10)))` will yield a left-exclusive, right-inclusive
     /// range from 4 to 10.
     ///
+    /// Values inserted while the iterator is in use are only yielded if they lie between the first
+    /// and last values that were in the range when it was created.
+    ///
     /// # Panics
     ///
     /// Panics if range `start > end`.
@@ -519,6 +525,8 @@ mod tests {
     use std::borrow::Borrow;
     use std::fmt::Debug;
     use std::ops::Bound::{Excluded, Unbounded};
+    use std::sync::Arc;
+    use std::thread;
 
     #[test]
     fn test_insert_works_as_expected() {
@@ -629,6 +637,67 @@ mod tests {
 
         let empty_range = map.range(5..).collect::<BTreeSet<_>>();
         assert_eq!(empty_range, vec![].into_iter().collect::<BTreeSet<_>>());
+    }
+
+    fn assert_get_ignores_pairs_inserted_with_other_keys<M>()
+    where
+        M: MultiPairLike<usize, usize> + Borrow<usize> + Debug + Clone + Send + 'static,
+    {
+        let map = BTreeMultiMap::<usize, usize, Vec<M>, M>::new();
+        for value in 100..110 {
+            map.insert(4, value);
+            map.insert(5, value);
+            map.insert(6, value);
+        }
+
+        let get = map.get(&5);
+        for value in 0..100 {
+            map.insert(4, value);
+            map.insert(6, value);
+        }
+
+        let keys = get.map(|(key, _)| *key).collect::<Vec<_>>();
+        assert_eq!(keys, vec![5; 10]);
+    }
+
+    // Regression for https://github.com/lucidarium-systems/indexset/issues/68.
+    #[test]
+    fn test_get_ignores_pairs_inserted_with_other_keys() {
+        assert_get_ignores_pairs_inserted_with_other_keys::<RandomMultiPair<usize, usize>>();
+        assert_get_ignores_pairs_inserted_with_other_keys::<OrdMultiPair<usize, usize>>();
+    }
+
+    #[test]
+    fn test_concurrent_get_only_returns_requested_key() {
+        let map = Arc::new(BTreeMultiMap::<usize, usize>::with_maximum_node_size(8));
+        for key in 1..=10 {
+            for value in 0..20 {
+                map.insert(key, value);
+            }
+        }
+
+        // Keys next to the smallest, a middle and the largest key keep changing
+        let writer = {
+            let map = Arc::clone(&map);
+            thread::spawn(move || {
+                for value in 1000..6000 {
+                    for key in [0, 6, 11] {
+                        map.insert(key, value);
+                        map.remove(&key, &value);
+                    }
+                }
+            })
+        };
+
+        while !writer.is_finished() {
+            for key in [1, 5, 10] {
+                assert!(
+                    map.get(&key).all(|(found, _)| *found == key),
+                    "get({key}) returned another key"
+                );
+            }
+        }
+        writer.join().unwrap();
     }
 
     fn assert_reinserting_pair_keeps_single_copy<M>()

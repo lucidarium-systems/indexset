@@ -419,6 +419,9 @@ where
     /// `range((Excluded(4), Included(10)))` will yield a left-exclusive, right-inclusive
     /// range from 4 to 10.
     ///
+    /// Values inserted while the iterator is in use are only yielded if they lie between the first
+    /// and last values that were in the range when it was created.
+    ///
     /// # Panics
     ///
     /// Panics if range `start > end`.
@@ -489,6 +492,23 @@ mod tests {
                 .into_iter()
                 .collect::<BTreeSet<_>>()
         );
+    }
+
+    // Regression for https://github.com/lucidarium-systems/indexset/issues/68.
+    #[test]
+    fn test_range_ignores_keys_inserted_outside_of_it() {
+        let map = BTreeMap::<u64, &str>::new();
+        for key in [1, 3, 7, 9] {
+            map.insert(key, "old");
+        }
+
+        let range = map.range(..=5);
+        map.insert(6, "new");
+        assert_eq!(range.map(|(key, _)| *key).collect::<Vec<_>>(), vec![1, 3]);
+
+        let range = map.range(5..);
+        map.insert(4, "new");
+        assert_eq!(range.map(|(key, _)| *key).collect::<Vec<_>>(), vec![6, 7, 9]);
     }
 
     #[test]

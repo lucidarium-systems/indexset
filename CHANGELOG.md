@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Concurrent first inserts into an empty tree no longer replace each other's node
 - Concurrent node splits are now retried when the node changed since the split was decided
 - `BTreeMultiMap` with the default `RandomMultiPair` no longer stores an equal key-value pair twice and can remove every pair it holds. Concurrent inserts of the same pair may still both be stored
+- Concurrent ranges and `BTreeMultiMap::get` no longer yield values from outside of their bounds that were inserted while iterating: https://github.com/lucidarium-systems/indexset/issues/68. Such values are now only yielded if they lie between the first and last values in the range when it was created
 
 ## [0.15.0] - 2026-02-14
 
