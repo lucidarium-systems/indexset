@@ -14,6 +14,8 @@ threads.
 Both the concurrent and single-threaded versions are meant to be drop-in replacements for the stdlib BTree. This 
 is mostly true for the latter but not for the former, yet.
 
+The crate uses the 2024 edition and requires Rust 1.85 or newer.
+
 The following table describes the variants of this data structure that are available:
 
 | Variant                                    | tl;dr                                                     | Stability |
