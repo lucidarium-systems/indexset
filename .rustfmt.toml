@@ -1,2 +1,4 @@
 edition = "2024"
 max_width = 120
+# Keeps the formatting style from before the 2024 edition migration
+style_edition = "2021"
