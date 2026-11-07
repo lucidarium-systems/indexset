@@ -492,6 +492,26 @@ mod tests {
     }
 
     #[test]
+    fn test_checked_insert_keeps_existing_value() {
+        let map = BTreeMap::<usize, &str>::new();
+        map.insert(1, "old");
+
+        assert_eq!(map.checked_insert(1, "new"), None);
+        assert_eq!(map.get(&1).map(|entry| entry.get().value), Some("old"));
+        assert_eq!(map.checked_insert(2, "new"), Some(()));
+
+        // A full node takes the split path.
+        let map = BTreeMap::<usize, &str>::new();
+        for key in 0..DEFAULT_INNER_SIZE {
+            map.insert(key, "old");
+        }
+
+        assert_eq!(map.checked_insert(100, "new"), None);
+        assert_eq!(map.get(&100).map(|entry| entry.get().value), Some("old"));
+        assert_eq!(map.len(), DEFAULT_INNER_SIZE);
+    }
+
+    #[test]
     fn test_split_insert_replaces_left_split_max() {
         let maximum_node_size = 4;
         let map = BTreeMap::<usize, &str>::with_maximum_node_size(maximum_node_size);

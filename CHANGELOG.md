@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Added `is_empty` to the concurrent `BTreeSet`, `BTreeMap`, and `BTreeMultiMap`
 - Added support for custom `BTreeMultiMap` pair representations through `MultiPairLike`, while keeping `RandomMultiPair` as the default and providing `OrdMultiPair` for ordered values and faster exact removals
+- Added `MultiPairLike::insert_cdc_into`, so pair representations can customize how `BTreeMultiMap` finds an equal pair on insert
+
+### Changed
+- `RandomMultiPair` equality, ordering and hashing now only use the key and the discriminator
 
 ### Fixed
 - CDC event IDs are now assigned only after operations commit, keeping them monotonic and free of gaps during concurrent operations
@@ -17,6 +21,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Inserting an existing key during a concurrent node split now correctly replaces the old value
 - Ranges with excluded borrowed-key bounds now omit all values for the excluded boundary keys
 - Node splitting now uses the current node length instead of its allocation capacity, preventing values from being lost with small maximum node sizes
+- `BTreeSet::get` now returns `None` for absent values instead of the next greater value
+- `range` on `BTreeSet` and `BTreeMap`, and `BTreeMap::range_mut`, now yield exactly the elements within bounds that are absent from the collection: https://github.com/lucidarium-systems/indexset/issues/56
+- `range` and `range_mut` now panic when the start of the range is greater than its end, as documented, instead of iterating to the end of the collection
+- `range_idx` and `range_mut_idx` now yield nothing for empty or reversed ranges and stop at the end of the collection instead of panicking
+- `BTreeMap::lower_bound` with an excluded absent key no longer skips the next key
+- `BTreeMap::iter_mut`, `values_mut` and `range_mut` no longer skip elements when `next` and `next_back` are mixed, and `range_mut` no longer overflows the stack
+- Equality, ordering and hashing of `BTreeSet` and `BTreeMap` now depend only on their elements instead of their node layout, and `BTreeMap` equality now compares values
+- `split_off` now keeps the maximum node size of the tree
+- Concurrent `remove_range` now removes exactly the values within its bounds, and no longer clears the first node for unbounded ends
+- Concurrent `checked_insert` no longer replaces an existing value when the node holding it is full
+- Concurrent removals no longer drop values inserted into a node while it is being emptied, and no longer miss values in the last node while its max is being updated
+- Concurrent first inserts into an empty tree no longer replace each other's node
+- Concurrent node splits are now retried when the node changed since the split was decided
+- `BTreeMultiMap` with the default `RandomMultiPair` no longer stores an equal key-value pair twice and can remove every pair it holds. Concurrent inserts of the same pair may still both be stored
 
 ## [0.15.0] - 2026-02-14
 

@@ -16,11 +16,30 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::collections::Bound;
+use std::hash::{Hash, Hasher};
 use std::iter::FusedIterator;
 use std::mem::swap;
 use std::ops::{Index, RangeBounds};
 
 type Node<T> = Vec<T>;
+
+// Panics on the same malformed ranges as the `std` collections.
+fn assert_range_is_valid<Q>(start: Bound<&Q>, end: Bound<&Q>, collection: &str)
+where
+    Q: Ord + ?Sized,
+{
+    match (start, end) {
+        (Bound::Excluded(start), Bound::Excluded(end)) if start == end => {
+            panic!("range start and end are equal and excluded in {collection}")
+        }
+        (Bound::Included(start) | Bound::Excluded(start), Bound::Included(end) | Bound::Excluded(end))
+            if start > end =>
+        {
+            panic!("range start is greater than range end in {collection}")
+        }
+        _ => {}
+    }
+}
 
 /// An ordered set based on a B-Tree.
 ///
@@ -78,7 +97,7 @@ type Node<T> = Vec<T>;
 /// let set = BTreeSet::from_iter([1, 2, 3]);
 /// ```
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Clone)]
 pub struct BTreeSet<T>
 where
     T: Ord,
@@ -287,12 +306,8 @@ impl<T: Ord> BTreeSet<T> {
         T: Borrow<Q> + Ord,
         Q: Ord + ?Sized,
     {
-        let (node_idx, position_within_node) = self.locate_value(value);
-        if let Some(candidate_node) = self.inner.get(node_idx) {
-            return candidate_node.get(position_within_node);
-        }
-
-        None
+        self.lower_bound(value)
+            .filter(|&candidate_value| value == candidate_value.borrow())
     }
     /// Returns a reference to the first element in the set, if any, that is not less than the
     /// input.
@@ -1013,6 +1028,7 @@ impl<T: Ord> BTreeSet<T> {
         remaining_nodes.reverse();
         remaining_nodes.insert(0, first_node);
         let mut latter_half = BTreeSet::default();
+        latter_half.node_capacity = self.node_capacity;
         latter_half.len = remaining_nodes.iter().map(|node| node.len()).sum();
         latter_half.inner = remaining_nodes;
         latter_half.index = FenwickTree::from_iter(latter_half.inner.iter().map(|node| node.len()));
@@ -1069,6 +1085,7 @@ impl<T: Ord> BTreeSet<T> {
         remaining_nodes.reverse();
         remaining_nodes.insert(0, first_node);
         let mut latter_half = BTreeSet::default();
+        latter_half.node_capacity = self.node_capacity;
         latter_half.len = remaining_nodes.iter().map(|node| node.len()).sum();
         latter_half.inner = remaining_nodes;
         latter_half.index = FenwickTree::from_iter(latter_half.inner.iter().map(|node| node.len()));
@@ -1115,43 +1132,45 @@ impl<T: Ord> BTreeSet<T> {
             self.replace(value);
         }
     }
-    fn resolve_range<R>(&self, range: R) -> ((usize, usize, usize), (usize, usize, usize))
+    // Resolves `range` into the global positions `start..end`, clamped to the length of the set.
+    fn resolve_range<R>(&self, range: R) -> std::ops::Range<usize>
     where
         R: RangeBounds<usize>,
     {
-        let mut global_front_idx: usize = 0;
-        let mut global_back_idx: usize = self.index.prefix_sum(self.inner.len(), 0).saturating_sub(1);
+        let start = match range.start_bound() {
+            Bound::Included(bound) => *bound,
+            Bound::Excluded(bound) => bound.saturating_add(1),
+            Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            Bound::Included(bound) => bound.saturating_add(1),
+            Bound::Excluded(bound) => *bound,
+            Bound::Unbounded => self.len(),
+        };
 
-        // Solving global indexes
-        let start = range.start_bound();
-        match start {
-            Bound::Included(bound) => {
-                global_front_idx = *bound;
-            }
-            Bound::Excluded(bound) => {
-                global_front_idx = *bound + 1;
-            }
-            Bound::Unbounded => (),
-        }
+        start.min(self.len())..end.min(self.len())
+    }
+    // Converts a range of values into the global positions `start..end` of the elements within it.
+    fn range_to_idx<R, Q>(&self, range: R) -> std::ops::Range<usize>
+    where
+        Q: Ord + ?Sized,
+        T: Borrow<Q>,
+        R: RangeBounds<Q>,
+    {
+        assert_range_is_valid(range.start_bound(), range.end_bound(), "BTreeSet");
 
-        let end = range.end_bound();
-        match end {
-            Bound::Included(bound) => {
-                global_back_idx = *bound;
-            }
-            Bound::Excluded(bound) => {
-                global_back_idx = *bound - 1;
-            }
-            Bound::Unbounded => (),
-        }
-        // Figuring out nodes
-        let (front_node_idx, front_start_idx) = self.locate_ith(global_front_idx);
-        let (back_node_idx, back_start_idx) = self.locate_ith(global_back_idx);
+        let start = match range.start_bound() {
+            Bound::Included(bound) => self.rank_cmp(|item: &Q| item < bound),
+            Bound::Excluded(bound) => self.rank_cmp(|item: &Q| item <= bound),
+            Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            Bound::Included(bound) => self.rank_cmp(|item: &Q| item <= bound),
+            Bound::Excluded(bound) => self.rank_cmp(|item: &Q| item < bound),
+            Bound::Unbounded => self.len(),
+        };
 
-        (
-            (global_front_idx, front_node_idx, front_start_idx),
-            (global_back_idx, back_node_idx, back_start_idx),
-        )
+        start..end
     }
     /// Constructs a double-ended iterator over a sub-range of elements in the set.
     /// The simplest way is to use the range syntax `min..max`, thus `range(min..max)` will
@@ -1186,18 +1205,7 @@ impl<T: Ord> BTreeSet<T> {
         T: Borrow<Q>,
         R: RangeBounds<Q>,
     {
-        let start_idx = match range.start_bound() {
-            Bound::Included(bound) => self.rank(bound),
-            Bound::Excluded(bound) => self.rank(bound) + 1,
-            Bound::Unbounded => 0,
-        };
-        let end_idx = match range.end_bound() {
-            Bound::Included(bound) => self.rank(bound),
-            Bound::Excluded(bound) => self.rank(bound).saturating_sub(1),
-            Bound::Unbounded => self.len().saturating_sub(1),
-        };
-
-        self.range_idx(start_idx..=end_idx)
+        self.range_idx(self.range_to_idx(range))
     }
     /// Returns the position in which the given element would fall in the already-existing sorted
     /// order.
@@ -1244,30 +1252,34 @@ impl<T: Ord> BTreeSet<T> {
     where
         R: RangeBounds<usize>,
     {
-        let ((global_front_idx, front_node_idx, front_start_idx), (global_back_idx, back_node_idx, back_start_idx)) =
-            self.resolve_range(range);
+        let std::ops::Range { start, end } = self.resolve_range(range);
+        if start >= end {
+            // Equal front and back positions make the iterator empty
+            return Range {
+                spine_iter: Iter {
+                    btree: self,
+                    current_front_node_idx: 0,
+                    current_front_idx: 0,
+                    current_back_node_idx: 0,
+                    current_back_idx: 0,
+                    current_front_iterator: None,
+                    current_back_iterator: None,
+                },
+            };
+        }
 
-        let front_iter = if front_node_idx < self.inner.len() {
-            Some(self.inner[front_node_idx][front_start_idx..].iter())
-        } else {
-            None
-        };
-
-        let back_iter = if back_node_idx < self.inner.len() {
-            Some(self.inner[back_node_idx][..=back_start_idx].iter())
-        } else {
-            None
-        };
+        let (front_node_idx, front_start_idx) = self.locate_ith(start);
+        let (back_node_idx, back_start_idx) = self.locate_ith(end - 1);
 
         Range {
             spine_iter: Iter {
                 btree: self,
                 current_front_node_idx: front_node_idx,
-                current_front_idx: global_front_idx,
+                current_front_idx: start,
                 current_back_node_idx: back_node_idx,
-                current_back_idx: global_back_idx + 1,
-                current_front_iterator: front_iter,
-                current_back_iterator: back_iter,
+                current_back_idx: end,
+                current_front_iterator: Some(self.inner[front_node_idx][front_start_idx..].iter()),
+                current_back_iterator: Some(self.inner[back_node_idx][..=back_start_idx].iter()),
             },
         }
     }
@@ -1315,6 +1327,45 @@ where
             node_capacity,
             len: 0,
         }
+    }
+}
+
+impl<T> PartialEq for BTreeSet<T>
+where
+    T: Ord,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().eq(other.iter())
+    }
+}
+
+impl<T> Eq for BTreeSet<T> where T: Ord {}
+
+impl<T> PartialOrd for BTreeSet<T>
+where
+    T: Ord,
+{
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T> Ord for BTreeSet<T>
+where
+    T: Ord,
+{
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.iter().cmp(other.iter())
+    }
+}
+
+impl<T> Hash for BTreeSet<T>
+where
+    T: Ord + Hash,
+{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.len().hash(state);
+        self.iter().for_each(|item| item.hash(state));
     }
 }
 
@@ -1954,7 +2005,7 @@ where
 /// ]);
 /// ```
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone)]
 pub struct BTreeMap<K, V>
 where
     K: Ord,
@@ -1970,6 +2021,55 @@ where
         Self {
             set: BTreeSet::default(),
         }
+    }
+}
+
+// Unlike the inner set, which only compares `Pair` keys, these take the values into account.
+impl<K, V> PartialEq for BTreeMap<K, V>
+where
+    K: Ord,
+    V: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().eq(other.iter())
+    }
+}
+
+impl<K, V> Eq for BTreeMap<K, V>
+where
+    K: Ord,
+    V: Eq,
+{
+}
+
+impl<K, V> PartialOrd for BTreeMap<K, V>
+where
+    K: Ord,
+    V: PartialOrd,
+{
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.iter().partial_cmp(other.iter())
+    }
+}
+
+impl<K, V> Ord for BTreeMap<K, V>
+where
+    K: Ord,
+    V: Ord,
+{
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.iter().cmp(other.iter())
+    }
+}
+
+impl<K, V> Hash for BTreeMap<K, V>
+where
+    K: Ord + Hash,
+    V: Hash,
+{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.len().hash(state);
+        self.iter().for_each(|item| item.hash(state));
     }
 }
 
@@ -2380,52 +2480,10 @@ where
     /// }
     /// ```
     pub fn iter_mut(&mut self) -> IterMut<'_, K, V> {
-        let last_node_idx = self.set.inner.len() - 1;
-        let len = self.set.len();
-
-        // Special handling for single node case
-        if self.set.inner.len() == 1 {
-            // Don't consume the node from inner iterator
-            // Both front and back should start from the same node
-            let mut inner = self.set.inner.iter_mut();
-            let node = inner.next().unwrap();
-            let front_iter = node.iter_mut();
-            // For single node, back_iter should be empty initially
-            // The iterator logic will handle switching to it when needed
-            let back_iter = [].iter_mut();
-
-            return IterMut {
-                inner,
-                current_front_node_idx: 0,
-                current_front_idx: 0,
-                current_back_node_idx: 0, // Same as front for single node
-                current_back_idx: len.wrapping_sub(1),
-                current_front_iterator: front_iter,
-                current_back_iterator: back_iter,
-            };
-        }
-
-        // For multiple nodes, handle normally
-        let mut inner = self.set.inner.iter_mut();
-        let front_iter = if let Some(node) = inner.next() {
-            node.iter_mut()
-        } else {
-            [].iter_mut()
-        };
-        let back_iter = if let Some(node) = inner.next_back() {
-            node.iter_mut()
-        } else {
-            [].iter_mut()
-        };
-
         IterMut {
-            inner,
-            current_front_node_idx: 0,
-            current_front_idx: 0,
-            current_back_node_idx: last_node_idx,
-            current_back_idx: len.wrapping_sub(1),
-            current_front_iterator: front_iter,
-            current_back_iterator: back_iter,
+            inner: self.set.inner.iter_mut(),
+            current_front_iterator: [].iter_mut(),
+            current_back_iterator: [].iter_mut(),
         }
     }
     /// Gets an iterator over the keys of the map, in sorted order.
@@ -2628,10 +2686,8 @@ where
         K: Borrow<Q>,
         R: RangeBounds<Q>,
     {
-        let (start_idx, end_idx) = self.range_to_idx(range);
-
         RangeMap {
-            inner: self.set.range_idx(start_idx..=end_idx),
+            inner: self.set.range_idx(self.range_to_idx(range)),
         }
     }
     pub fn range_idx<R>(&self, range: R) -> RangeMap<'_, K, V>
@@ -2642,37 +2698,26 @@ where
             inner: self.set.range_idx(range),
         }
     }
-    fn range_to_idx<Q, R>(&self, range: R) -> (usize, usize)
+    fn range_to_idx<Q, R>(&self, range: R) -> std::ops::Range<usize>
     where
         Q: Ord + ?Sized,
         K: Borrow<Q>,
         R: RangeBounds<Q>,
     {
-        let start_idx = match range.start_bound() {
+        assert_range_is_valid(range.start_bound(), range.end_bound(), "BTreeMap");
+
+        let start = match range.start_bound() {
             Bound::Included(bound) => self.set.rank_cmp(|item: &Pair<K, V>| item.key.borrow() < bound),
             Bound::Excluded(bound) => self.set.rank_cmp(|item: &Pair<K, V>| item.key.borrow() <= bound),
             Bound::Unbounded => 0,
         };
-        let end_idx = match range.end_bound() {
-            Bound::Included(bound) => self.set.rank_cmp(|item: &Pair<K, V>| item.key.borrow() < bound),
-            Bound::Excluded(bound) => {
-                let rank = self.set.rank_cmp(|item: &Pair<K, V>| item.key.borrow() < bound);
-                if rank == 0 {
-                    // No elements before this bound, return empty range
-                    return (1, 0);
-                }
-                rank - 1
-            }
-            Bound::Unbounded => {
-                if self.is_empty() {
-                    // Empty map, return empty range
-                    return (1, 0);
-                }
-                self.len() - 1
-            }
+        let end = match range.end_bound() {
+            Bound::Included(bound) => self.set.rank_cmp(|item: &Pair<K, V>| item.key.borrow() <= bound),
+            Bound::Excluded(bound) => self.set.rank_cmp(|item: &Pair<K, V>| item.key.borrow() < bound),
+            Bound::Unbounded => self.len(),
         };
 
-        (start_idx, end_idx)
+        start..end
     }
     /// Constructs a mutable double-ended iterator over a sub-range of elements in the map.
     /// The simplest way is to use the range syntax `min..max`, thus `range(min..max)` will
@@ -2708,61 +2753,44 @@ where
         K: Borrow<Q>,
         R: RangeBounds<Q>,
     {
-        let (start_idx, end_idx) = self.range_to_idx(range);
+        let range = self.range_to_idx(range);
 
-        self.range_mut_idx(start_idx..=end_idx)
+        self.range_mut_idx(range)
     }
     pub fn range_mut_idx<R>(&mut self, range: R) -> RangeMut<'_, K, V>
     where
         R: RangeBounds<usize>,
     {
-        let ((global_front_idx, front_node_idx, front_start_idx), (global_back_idx, back_node_idx, back_start_idx)) =
-            self.set.resolve_range(range);
-        let end = self.set.inner[back_node_idx].len();
-
-        let mut inner = self.set.inner.iter_mut();
-
-        let mut front_iter = {
-            if let Some(node) = inner.nth(front_node_idx) {
-                node.iter_mut()
-            } else {
-                [].iter_mut()
-            }
-        };
-
-        let mut back_iter = {
-            if let Some(node) = inner.nth(back_node_idx - front_node_idx) {
-                node.iter_mut()
-            } else {
-                [].iter_mut()
-            }
-        };
-
-        for _ in 0..front_start_idx {
-            front_iter.next();
-        }
-        let offset = back_node_idx - front_node_idx;
-        if offset > 0 {
-            for _ in back_start_idx..end {
-                back_iter.next_back();
-            }
-        } else {
-            for _ in back_start_idx..end {
-                front_iter.next_back();
-            }
+        let std::ops::Range { start, end } = self.set.resolve_range(range);
+        if start >= end {
+            return RangeMut {
+                inner: IterMut {
+                    inner: [].iter_mut(),
+                    current_front_iterator: [].iter_mut(),
+                    current_back_iterator: [].iter_mut(),
+                },
+            };
         }
 
-        RangeMut {
-            inner: IterMut {
-                inner,
-                current_front_node_idx: front_node_idx,
-                current_front_idx: global_front_idx,
-                current_back_node_idx: back_node_idx,
-                current_back_idx: global_back_idx,
-                current_front_iterator: front_iter,
-                current_back_iterator: back_iter,
+        let (front_node_idx, front_start_idx) = self.set.locate_ith(start);
+        let (back_node_idx, back_start_idx) = self.set.locate_ith(end - 1);
+
+        // The first and last nodes are only partially in the range, the ones between them are not
+        let inner = match &mut self.set.inner[front_node_idx..=back_node_idx] {
+            [node] => IterMut {
+                inner: [].iter_mut(),
+                current_front_iterator: node[front_start_idx..=back_start_idx].iter_mut(),
+                current_back_iterator: [].iter_mut(),
             },
-        }
+            [front_node, nodes_between @ .., back_node] => IterMut {
+                inner: nodes_between.iter_mut(),
+                current_front_iterator: front_node[front_start_idx..].iter_mut(),
+                current_back_iterator: back_node[..=back_start_idx].iter_mut(),
+            },
+            [] => unreachable!("a non-empty range spans at least one node"),
+        };
+
+        RangeMut { inner }
     }
     /// Removes a key from the map, returning the value at the key if the key
     /// was previously in the map.
@@ -3077,7 +3105,7 @@ where
     {
         let start_idx = match bound {
             Bound::Included(start) => self.set.rank_cmp(|item: &Pair<K, V>| item.key.borrow() < start),
-            Bound::Excluded(start) => self.set.rank_cmp(|item: &Pair<K, V>| item.key.borrow() < start) + 1,
+            Bound::Excluded(start) => self.set.rank_cmp(|item: &Pair<K, V>| item.key.borrow() <= start),
             Bound::Unbounded => 0,
         };
 
@@ -3469,10 +3497,6 @@ where
     K: Ord,
 {
     inner: std::slice::IterMut<'a, Node<Pair<K, V>>>,
-    current_front_node_idx: usize,
-    current_front_idx: usize,
-    current_back_node_idx: usize,
-    current_back_idx: usize,
     current_front_iterator: std::slice::IterMut<'a, Pair<K, V>>,
     current_back_iterator: std::slice::IterMut<'a, Pair<K, V>>,
 }
@@ -3484,36 +3508,21 @@ where
     type Item = (&'a K, &'a mut V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_front_idx == self.current_back_idx.wrapping_add(1) {
-            return None;
+        loop {
+            if let Some(entry) = self.current_front_iterator.next() {
+                return Some((&entry.key, &mut entry.value));
+            }
+            // Once no nodes are left in between, the front continues into the back iterator
+            match self.inner.next() {
+                Some(node) => self.current_front_iterator = node.iter_mut(),
+                None => {
+                    return self
+                        .current_back_iterator
+                        .next()
+                        .map(|entry| (&entry.key, &mut entry.value))
+                }
+            }
         }
-        if let Some(entry) = self.current_front_iterator.next() {
-            self.current_front_idx += 1;
-            return Some((&entry.key, &mut entry.value));
-        } else {
-            // If the current iterator has been exhausted, we have to check whether there are any
-            // iterators left
-            if self.current_front_node_idx == self.inner.size_hint().0 {
-                return None;
-            }
-            if self.current_front_node_idx == self.current_back_node_idx - 1 {
-                // take from the current back iter
-                if let Some(entry) = self.current_back_iterator.next() {
-                    self.current_front_idx += 1;
-                    return Some((&entry.key, &mut entry.value));
-                }
-            } else {
-                // advance front
-                self.current_front_node_idx += 1;
-                if let Some(node) = self.inner.next() {
-                    self.current_front_iterator = node.iter_mut();
-                }
-
-                return self.next();
-            }
-        };
-
-        None
     }
 }
 
@@ -3522,41 +3531,21 @@ where
     K: Ord,
 {
     fn next_back(&mut self) -> Option<Self::Item> {
-        if self.current_front_idx == self.current_back_idx.wrapping_add(1) {
-            return None;
+        loop {
+            if let Some(entry) = self.current_back_iterator.next_back() {
+                return Some((&entry.key, &mut entry.value));
+            }
+            // Once no nodes are left in between, the back continues into the front iterator
+            match self.inner.next_back() {
+                Some(node) => self.current_back_iterator = node.iter_mut(),
+                None => {
+                    return self
+                        .current_front_iterator
+                        .next_back()
+                        .map(|entry| (&entry.key, &mut entry.value));
+                }
+            }
         }
-        if let Some(entry) = self.current_back_iterator.next_back() {
-            self.current_back_idx -= 1;
-            return Some((&entry.key, &mut entry.value));
-        } else {
-            // If the current iterator has been exhausted, we have to check whether there are any
-            // iterators left
-            if self.current_back_node_idx == 0 && self.current_front_node_idx != 0 {
-                return None;
-            }
-            // Handle single node case or adjacent nodes
-            if self.current_front_node_idx == self.current_back_node_idx
-                || self.current_front_node_idx == self.current_back_node_idx - 1
-            {
-                // take from the current front iter
-                if let Some(entry) = self.current_front_iterator.next_back() {
-                    if self.current_back_idx > 0 {
-                        self.current_back_idx -= 1;
-                    }
-                    return Some((&entry.key, &mut entry.value));
-                }
-            } else {
-                // advance back
-                self.current_back_node_idx -= 1;
-                if let Some(node) = self.inner.next_back() {
-                    self.current_back_iterator = node.iter_mut();
-                }
-
-                return self.next_back();
-            }
-        };
-
-        None
     }
 }
 
@@ -4417,5 +4406,289 @@ mod tests {
 
         let out = map.get_mut(&uuid::uuid!("019c34bf-47c0-7df1-9d46-52013234139b"));
         assert!(out.is_none());
+    }
+
+    fn random_bound(rng: &mut impl Rng, max: u64) -> Bound<u64> {
+        match rng.random_range(0..3) {
+            0 => Bound::Unbounded,
+            1 => Bound::Included(rng.random_range(0..max)),
+            _ => Bound::Excluded(rng.random_range(0..max)),
+        }
+    }
+
+    // `std` panics on these, so they are checked separately.
+    fn is_valid_range(start: Bound<u64>, end: Bound<u64>) -> bool {
+        match (start, end) {
+            (Bound::Excluded(start), Bound::Excluded(end)) => start < end,
+            (Bound::Included(start) | Bound::Excluded(start), Bound::Included(end) | Bound::Excluded(end)) => {
+                start <= end
+            }
+            _ => true,
+        }
+    }
+
+    fn hash_of<T: std::hash::Hash>(value: &T) -> u64 {
+        use std::hash::Hasher;
+
+        let mut hasher = std::hash::DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn test_get_returns_only_equal_values() {
+        let set = BTreeSet::from_iter([1, 2, 3, 5]);
+
+        assert_eq!(set.get(&0), None);
+        assert_eq!(set.get(&4), None);
+        assert_eq!(set.get(&6), None);
+        assert_eq!(set.get(&5), Some(&5));
+    }
+
+    // Regression for https://github.com/lucidarium-systems/indexset/issues/56.
+    #[test]
+    fn test_range_with_absent_bounds() {
+        let set = BTreeSet::from_iter([1_u64, 3, 5, 7]);
+
+        assert_eq!(set.range(..=2).copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(set.range(..=2).rev().copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(set.range(1..1).count(), 0);
+        assert_eq!(set.range(..1).count(), 0);
+        assert_eq!(
+            set.range((Bound::Excluded(0), Bound::Unbounded))
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![1, 3, 5, 7]
+        );
+        assert_eq!(
+            set.range((Bound::Excluded(2), Bound::Unbounded))
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![3, 5, 7]
+        );
+
+        let map = BTreeMap::from_iter([(1_u64, "a"), (3, "b"), (5, "c"), (7, "d")]);
+
+        assert_eq!(map.range(..=2).map(|(key, _)| *key).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(map.range(1..1).count(), 0);
+        assert_eq!(map.lower_bound(Bound::Excluded(&2)).key(), Some(&3));
+        assert_eq!(map.lower_bound(Bound::Excluded(&3)).key(), Some(&5));
+    }
+
+    #[test]
+    #[should_panic(expected = "range start is greater than range end in BTreeSet")]
+    fn test_set_range_panics_when_start_is_greater_than_end() {
+        let set = BTreeSet::from_iter(0..10);
+
+        set.range((Bound::Included(5), Bound::Excluded(3))).count();
+    }
+
+    #[test]
+    #[should_panic(expected = "range start and end are equal and excluded in BTreeSet")]
+    fn test_set_range_panics_when_equal_bounds_are_excluded() {
+        let set = BTreeSet::from_iter(0..10);
+
+        set.range((Bound::Excluded(5), Bound::Excluded(5))).count();
+    }
+
+    #[test]
+    #[should_panic(expected = "range start is greater than range end in BTreeMap")]
+    fn test_map_range_panics_when_start_is_greater_than_end() {
+        let map = BTreeMap::from_iter((0..10).map(|key| (key, key)));
+
+        map.range((Bound::Included(5), Bound::Excluded(3))).count();
+    }
+
+    #[test]
+    fn test_range_idx_edge_cases() {
+        let set = BTreeSet::from_iter(0..10);
+
+        assert_eq!(set.range_idx(..0).count(), 0);
+        assert_eq!(set.range_idx(3..3).count(), 0);
+        assert_eq!(set.range_idx((Bound::Included(5), Bound::Excluded(3))).count(), 0);
+        assert_eq!(set.range_idx(8..100).copied().collect::<Vec<_>>(), vec![8, 9]);
+
+        let mut map = BTreeMap::from_iter((0..10).map(|key| (key, key)));
+
+        assert_eq!(map.range_mut_idx(..0).count(), 0);
+        assert_eq!(map.range_mut_idx((Bound::Included(5), Bound::Excluded(3))).count(), 0);
+        assert_eq!(map.range_mut_idx(0..100).count(), 10);
+    }
+
+    #[test]
+    fn test_range_matches_std() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(56);
+
+        for maximum_node_size in [4, 5, 16, DEFAULT_INNER_SIZE] {
+            let mut set = BTreeSet::with_maximum_node_size(maximum_node_size);
+            let mut map = BTreeMap::with_maximum_node_size(maximum_node_size);
+            let mut std_set = std::collections::BTreeSet::new();
+            for _ in 0..500 {
+                let value: u64 = rng.random_range(0..1000);
+                set.insert(value);
+                map.insert(value, value);
+                std_set.insert(value);
+            }
+            // Leave some nodes sparse
+            for _ in 0..200 {
+                let value: u64 = rng.random_range(0..1000);
+                set.remove(&value);
+                map.remove(&value);
+                std_set.remove(&value);
+            }
+
+            for _ in 0..2000 {
+                let (start, end) = (random_bound(&mut rng, 1000), random_bound(&mut rng, 1000));
+                if !is_valid_range(start, end) {
+                    continue;
+                }
+                let expected = std_set.range((start, end)).copied().collect::<Vec<_>>();
+                let expected_rev = expected.iter().rev().copied().collect::<Vec<_>>();
+
+                assert_eq!(
+                    set.range((start, end)).copied().collect::<Vec<_>>(),
+                    expected,
+                    "{start:?}..{end:?}"
+                );
+                assert_eq!(set.range((start, end)).rev().copied().collect::<Vec<_>>(), expected_rev);
+                assert_eq!(
+                    map.range((start, end)).map(|(key, _)| *key).collect::<Vec<_>>(),
+                    expected
+                );
+                assert_eq!(
+                    map.range((start, end)).rev().map(|(key, _)| *key).collect::<Vec<_>>(),
+                    expected_rev
+                );
+                assert_eq!(
+                    map.range_mut((start, end)).map(|(key, _)| *key).collect::<Vec<_>>(),
+                    expected
+                );
+                assert_eq!(
+                    map.range_mut((start, end))
+                        .rev()
+                        .map(|(key, _)| *key)
+                        .collect::<Vec<_>>(),
+                    expected_rev
+                );
+            }
+
+            for value in 0..1000 {
+                assert_eq!(set.get(&value), std_set.get(&value));
+                assert_eq!(
+                    map.lower_bound(Bound::Included(&value)).key(),
+                    std_set.range(value..).next()
+                );
+                assert_eq!(
+                    map.lower_bound(Bound::Excluded(&value)).key(),
+                    std_set.range((Bound::Excluded(value), Bound::Unbounded)).next()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_iter_mut_interleaved_with_next_back() {
+        let mut map = BTreeMap::with_maximum_node_size(4);
+        for key in 0..6 {
+            map.insert(key, key);
+        }
+
+        let mut iter = map.iter_mut();
+        assert_eq!(iter.next_back().map(|(key, _)| *key), Some(5));
+        assert_eq!(iter.next().map(|(key, _)| *key), Some(0));
+        assert_eq!(iter.map(|(key, _)| *key).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_iter_mut_matches_std() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(43);
+
+        for maximum_node_size in [4, 5, 16] {
+            for len in 0..40 {
+                let mut map = BTreeMap::with_maximum_node_size(maximum_node_size);
+                let mut std_map = std::collections::BTreeMap::new();
+                for key in 0..len {
+                    map.insert(key, 0);
+                    std_map.insert(key, 0);
+                }
+
+                let mut iter = map.iter_mut();
+                let mut std_iter = std_map.iter_mut();
+                loop {
+                    let (item, std_item) = if rng.random_bool(0.5) {
+                        (iter.next(), std_iter.next())
+                    } else {
+                        (iter.next_back(), std_iter.next_back())
+                    };
+                    assert_eq!(
+                        item.as_ref().map(|(key, _)| **key),
+                        std_item.as_ref().map(|(key, _)| **key)
+                    );
+                    match (item, std_item) {
+                        (Some((_, value)), Some((_, std_value))) => {
+                            *value += 1;
+                            *std_value += 1;
+                        }
+                        _ => break,
+                    }
+                }
+
+                assert!(map.iter().map(|(key, value)| (*key, *value)).eq(std_map.into_iter()));
+            }
+        }
+    }
+
+    #[test]
+    fn test_eq_and_hash_ignore_node_layout() {
+        let ascending = BTreeSet::from_iter(0..3000);
+        let descending = BTreeSet::from_iter((0..3000).rev());
+        let mut small_nodes = BTreeSet::with_maximum_node_size(4);
+        for value in 0..3000 {
+            small_nodes.insert(value);
+        }
+
+        assert_eq!(ascending, descending);
+        assert_eq!(ascending, small_nodes);
+        assert_eq!(hash_of(&ascending), hash_of(&descending));
+        assert_eq!(hash_of(&ascending), hash_of(&small_nodes));
+        assert_ne!(ascending, BTreeSet::from_iter(0..2999));
+        assert!(BTreeSet::from_iter([1, 2, 3]) < BTreeSet::from_iter([1, 3]));
+    }
+
+    #[test]
+    fn test_map_eq_compares_values() {
+        let map = BTreeMap::from_iter([(1, "a"), (2, "b")]);
+        let other_value = BTreeMap::from_iter([(1, "a"), (2, "c")]);
+        let mut small_nodes = BTreeMap::with_maximum_node_size(4);
+        small_nodes.insert(2, "b");
+        small_nodes.insert(1, "a");
+
+        assert_ne!(map, other_value);
+        assert!(map < other_value);
+        assert_eq!(map, small_nodes);
+        assert_eq!(hash_of(&map), hash_of(&small_nodes));
+    }
+
+    #[test]
+    fn test_split_off_keeps_maximum_node_size() {
+        let mut set = BTreeSet::with_maximum_node_size(8);
+        for value in 0..100 {
+            set.insert(value);
+        }
+
+        let mut latter_half = set.split_off(&50);
+        for value in 100..200 {
+            latter_half.insert(value);
+        }
+
+        assert_eq!(latter_half.node_capacity, 8);
+        assert!(latter_half.inner.iter().all(|node| node.len() <= 8));
+
+        let mut map = BTreeMap::with_maximum_node_size(8);
+        for key in 0..100 {
+            map.insert(key, key);
+        }
+
+        assert_eq!(map.split_off(&50).set.node_capacity, 8);
     }
 }

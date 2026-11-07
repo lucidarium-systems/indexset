@@ -153,24 +153,26 @@ where
                         let first_node = Arc::new(Mutex::new(first_node));
 
                         drop(_global_guard);
-                        if self.index_lock.try_write().is_ok() {
-                            #[cfg(feature = "cdc")]
-                            {
-                                let node_insertion = ChangeEvent::CreateNode {
-                                    // is correct as index is locked and current thread is the only that can
-                                    // fetch event_id.
-                                    event_id: self.event_id.fetch_add(1, Ordering::AcqRel).into(),
-                                    max_value: value.clone(),
-                                };
-                                cdc.push(node_insertion);
-                            }
-
-                            self.index.insert(value, first_node);
-
-                            return Ok((None, cdc));
+                        let _global_guard = self.index_lock.write();
+                        // Another thread may have created the first node in the meantime
+                        if !self.index.is_empty() {
+                            continue;
                         }
 
-                        continue;
+                        #[cfg(feature = "cdc")]
+                        {
+                            let node_insertion = ChangeEvent::CreateNode {
+                                // is correct as index is locked and current thread is the only that can
+                                // fetch event_id.
+                                event_id: self.event_id.fetch_add(1, Ordering::AcqRel).into(),
+                                max_value: value.clone(),
+                            };
+                            cdc.push(node_insertion);
+                        }
+
+                        self.index.insert(value, first_node);
+
+                        return Ok((None, cdc));
                     }
                 }
             };
@@ -189,7 +191,8 @@ where
                             // is correct as node is locked and current thread is the only that can
                             // fetch event_id, so events for this node will have monotonic id's.
                             event_id: self.event_id.fetch_add(1, Ordering::AcqRel).into(),
-                            max_value: old_max.clone().unwrap_or(value.clone()),
+                            // A node emptied by a concurrent removal is still known by its index key.
+                            max_value: old_max.clone().unwrap_or_else(|| target_node_entry.key().clone()),
                             value: value.clone(),
                             index: idx,
                         };
@@ -209,6 +212,15 @@ where
                     return Err((node_guard, idx, old_max.unwrap()));
                 }
             } else {
+                // An existing value is replaced in place, which never needs a split
+                if let Some(idx) = node_guard.try_select(&value) {
+                    let max = node_guard
+                        .max()
+                        .cloned()
+                        .expect("a node that needs a split is not empty");
+                    return Err((node_guard, idx, max));
+                }
+
                 operation = Some(Operation::Split(
                     target_node_entry.value().clone(),
                     target_node_entry.key().clone(),
@@ -224,7 +236,7 @@ where
             let op = operation.unwrap();
             match &op {
                 Operation::Split(_, _, _) => {
-                    if let Ok((value, value_cdc)) = op.commit(&self.index) {
+                    if let Ok((value, value_cdc)) = op.commit(&self.index, self.node_capacity) {
                         #[cfg(feature = "cdc")]
                         {
                             for unassigned_event in value_cdc {
@@ -238,7 +250,7 @@ where
                     }
                 }
                 Operation::UpdateMax(_, _) => {
-                    return if let Ok((value, value_cdc)) = op.commit(&self.index) {
+                    return if let Ok((value, value_cdc)) = op.commit(&self.index, self.node_capacity) {
                         #[cfg(feature = "cdc")]
                         {
                             for unassigned_event in value_cdc {
@@ -359,7 +371,13 @@ where
     {
         let mut cdc = vec![];
         let _global_guard = self.index_lock.read();
-        if let Some(target_node_entry) = self.index.lower_bound(std::ops::Bound::Included(value)) {
+        // Values past the last key can be in the last node until its pending max update commits,
+        // so it is searched just like on inserts.
+        if let Some(target_node_entry) = self
+            .index
+            .lower_bound(std::ops::Bound::Included(value))
+            .or_else(|| self.index.back())
+        {
             let mut node_guard = target_node_entry.value().lock_arc();
             let old_max = node_guard.max().cloned();
             let deleted = NodeLike::delete(&mut *node_guard, value);
@@ -402,7 +420,7 @@ where
 
             let _global_guard = self.index_lock.write();
 
-            return if let Ok((_, value_cdc)) = operation.unwrap().commit(&self.index) {
+            return if let Ok((_, value_cdc)) = operation.unwrap().commit(&self.index, self.node_capacity) {
                 #[cfg(feature = "cdc")]
                 {
                     for unassigned_event in value_cdc {
@@ -1137,112 +1155,77 @@ where
     {
         let _global_guard = self.index_lock.write();
 
-        let start_bound = range.start_bound();
-        let end_bound = range.end_bound();
-        let potential_front_entry = self.index.lower_bound(start_bound);
-        let potential_back_entry = self.index.lower_bound(end_bound);
+        // The front node holds the first value to remove, if there is any. Values past the last key
+        // can still be in the last node, just like on removals.
+        let Some(front_entry) = self
+            .index
+            .lower_bound(range.start_bound())
+            .or_else(|| self.index.back())
+        else {
+            return;
+        };
+        // The back node holds the last value to remove, which is in the last node if the range
+        // ends past every value
+        let back_entry = match range.end_bound() {
+            Bound::Included(bound) | Bound::Excluded(bound) => self.index.lower_bound(Bound::Included(bound)),
+            Bound::Unbounded => None,
+        }
+        .or_else(|| self.index.back())
+        .expect("the index has a front entry, so it is not empty");
+        if front_entry.key() > back_entry.key() {
+            return;
+        }
 
-        let (potential_front_entry_guard, potential_front_position) =
-            if let Some(front_entry) = potential_front_entry.clone() {
-                let mut front_position = 0;
+        let mut front_entry_guard = front_entry.value().lock_arc();
+        let front_position = match range.start_bound() {
+            Bound::Included(bound) => front_entry_guard.partition_point(|value| value.borrow() < bound),
+            Bound::Excluded(bound) => front_entry_guard.partition_point(|value| value.borrow() <= bound),
+            Bound::Unbounded => 0,
+        };
+        let back_position = |node: &Vec<T>| match range.end_bound() {
+            Bound::Included(bound) => node.partition_point(|value| value.borrow() <= bound),
+            Bound::Excluded(bound) => node.partition_point(|value| value.borrow() < bound),
+            Bound::Unbounded => node.len(),
+        };
 
-                let guard = front_entry.value().lock_arc();
-                if let Some(position) = guard.rank(start_bound, true) {
-                    front_position = position.wrapping_add(1);
-                }
-
-                (Some(guard), front_position)
-            } else {
-                (None, 0)
-            };
-
-        let (potential_back_entry_guard, potential_back_position) =
-            if let Some(back_entry) = potential_back_entry.clone() {
-                let mut back_position = 0;
-                let mut guard = None;
-
-                if let Some(front_entry) = potential_front_entry.as_ref() {
-                    if !Arc::ptr_eq(back_entry.value(), front_entry.value()) {
-                        let new_guard = back_entry.value().lock_arc();
-                        let position = new_guard.rank(end_bound, true);
-                        if let Some(position) = position {
-                            back_position = position;
-                        } else {
-                            back_position = new_guard.len()
-                        }
-
-                        guard = Some(new_guard);
-                    } else if let Some((len, position)) = potential_front_entry_guard
-                        .as_ref()
-                        .map(|g| (g.len(), g.rank(end_bound, true)))
-                    {
-                        if let Some(position) = position {
-                            back_position = position;
-                        } else {
-                            back_position = len;
-                        }
-                    }
-                }
-
-                (guard, back_position)
-            } else {
-                (None, 0)
-            };
-
-        // If there is a front entry
-        if let Some(mut front_entry_guard) = potential_front_entry_guard {
-            let front_entry = potential_front_entry.unwrap();
-            // But no back entry
-            if potential_back_entry_guard.is_none() {
-                // Then we drain the front entry
-                let adjusted_back_position = {
-                    if potential_front_position > potential_back_position {
-                        front_entry_guard.len()
-                    } else {
-                        potential_back_position
-                    }
-                };
-                front_entry_guard.drain(potential_front_position..adjusted_back_position);
-                // Clone the mutex
-                let old_entry_value = front_entry.value().clone();
-                // Remove the entry
-                front_entry.remove();
-                // If it is empty, that's it
-                if front_entry_guard.is_empty() {
-                    return;
-                }
-                // Otherwise we insert it again with a new max
-                let new_max = front_entry_guard.last().unwrap().clone();
-                self.index.insert(new_max, old_entry_value);
-            } else if let Some(mut back_entry_guard) = potential_back_entry_guard {
-                let back_entry = potential_back_entry.unwrap();
-                // Otherwise we remove every single node between them
-                while let Some(next_entry) = front_entry.next() {
-                    if next_entry.key().eq(back_entry.key()) {
-                        break;
-                    }
-
-                    next_entry.remove();
-                }
-
-                // And then trim the front from the left
-                front_entry.remove();
-                front_entry_guard.drain(potential_front_position..);
-                if !front_entry_guard.is_empty() {
-                    let new_front_max = front_entry_guard.last().unwrap().clone();
-                    self.index.insert(new_front_max, front_entry.value().clone());
-                }
-
-                // The back from the right
-                back_entry.remove();
-                back_entry_guard.drain(..potential_back_position);
-                if !back_entry_guard.is_empty() {
-                    let new_back_max = back_entry_guard.last().unwrap().clone();
-                    self.index.insert(new_back_max, back_entry.value().clone());
-                }
-
-                // And that's it
+        if Arc::ptr_eq(front_entry.value(), back_entry.value()) {
+            let back_position = back_position(&front_entry_guard);
+            if front_position >= back_position {
+                return;
             }
+            front_entry_guard.drain(front_position..back_position);
+            self.reinsert_drained_node(&front_entry, &front_entry_guard);
+
+            return;
+        }
+
+        let mut back_entry_guard = back_entry.value().lock_arc();
+        let back_position = back_position(&back_entry_guard);
+
+        // Every node between the front and back nodes is in the range
+        while let Some(next_entry) = front_entry.next() {
+            if Arc::ptr_eq(next_entry.value(), back_entry.value()) {
+                break;
+            }
+
+            next_entry.remove();
+        }
+
+        front_entry_guard.drain(front_position..);
+        self.reinsert_drained_node(&front_entry, &front_entry_guard);
+        back_entry_guard.drain(..back_position);
+        self.reinsert_drained_node(&back_entry, &back_entry_guard);
+    }
+    // Moves a node that had values drained under its new max, or drops it once it is empty.
+    fn reinsert_drained_node(&self, entry: &crossbeam_skiplist::map::Entry<'_, T, Arc<Mutex<Vec<T>>>>, node: &[T]) {
+        let node_max = node.last();
+        if node_max == Some(entry.key()) {
+            return;
+        }
+
+        entry.remove();
+        if let Some(node_max) = node_max {
+            self.index.insert(node_max.clone(), entry.value().clone());
         }
     }
 }
@@ -1252,7 +1235,8 @@ mod tests {
     use crate::concurrent::set::{BTreeSet, DEFAULT_INNER_SIZE};
     use rand::Rng;
     use std::collections::HashSet;
-    use std::ops::Bound::Included;
+    use std::ops::Bound::{Excluded, Included, Unbounded};
+    use std::ops::RangeBounds;
     use std::sync::{Arc, Mutex};
     use std::thread;
 
@@ -1535,10 +1519,10 @@ mod tests {
         let actual_len = btree.len();
         assert_eq!(expected_len, actual_len);
 
-        // And then more (512 * 3) / 2
+        // And then everything from (1024 * 3) / 2 onwards, which are the last 512 elements
         let from = (DEFAULT_INNER_SIZE * 3) / 2;
         btree.remove_range(from..);
-        let expected_len = expected_len - (DEFAULT_INNER_SIZE) - 5 + 10;
+        let expected_len = expected_len - DEFAULT_INNER_SIZE / 2;
         let actual_len = btree.len();
         assert_eq!(expected_len, actual_len);
 
@@ -1838,5 +1822,105 @@ mod tests {
             set.insert(i);
         }
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_remove_range_matches_std() {
+        // Only even values are stored, so odd bounds are absent from the set.
+        let ranges = [
+            (Included(2), Included(6)),
+            (Included(2), Excluded(6)),
+            (Excluded(3), Excluded(11)),
+            (Included(100), Excluded(9000)),
+            (Included(100), Included(9000)),
+            (Excluded(101), Included(8999)),
+            (Included(5000), Unbounded),
+            (Excluded(4999), Unbounded),
+            (Unbounded, Excluded(5000)),
+            (Unbounded, Included(5001)),
+            (Included(9990), Included(1_000_000)),
+            (Included(20_000), Unbounded),
+            (Unbounded, Unbounded),
+            (Included(6), Excluded(6)),
+            (Included(7), Included(3)),
+        ];
+
+        for maximum_node_size in [16, DEFAULT_INNER_SIZE] {
+            for range in ranges {
+                let set = BTreeSet::<usize>::with_maximum_node_size(maximum_node_size);
+                for value in (0..10_000).step_by(2) {
+                    set.insert(value);
+                }
+
+                set.remove_range(range);
+
+                let expected = (0..10_000)
+                    .step_by(2)
+                    .filter(|value| !range.contains(value))
+                    .collect::<Vec<_>>();
+                assert_eq!(set.iter().copied().collect::<Vec<_>>(), expected, "{range:?}");
+                assert_eq!(set.len(), expected.len(), "{range:?}");
+                assert!(expected.iter().all(|value| set.contains(value)), "{range:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_concurrent_remove_keeps_values_inserted_into_emptied_node() {
+        // Every thread keeps at most one value in the single node, so removals keep emptying it
+        // while other threads insert into it.
+        for _ in 0..300 {
+            let set = Arc::new(BTreeSet::<usize>::new());
+            let handles = (0..8)
+                .map(|thread_idx| {
+                    let set = Arc::clone(&set);
+                    thread::spawn(move || {
+                        for _ in 0..300 {
+                            set.insert(thread_idx);
+                            assert!(set.contains(&thread_idx), "value {thread_idx} was lost after insert");
+                            set.remove(&thread_idx);
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            for handle in handles {
+                handle.join().unwrap();
+            }
+            assert!(set.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_concurrent_insert_remove_with_small_nodes() {
+        let threads = 8;
+        for _ in 0..30 {
+            let set = Arc::new(BTreeSet::<usize>::with_maximum_node_size(4));
+            let handles = (0..threads)
+                .map(|thread_idx| {
+                    let set = Arc::clone(&set);
+                    thread::spawn(move || {
+                        let values = (0..4).map(|i| i * threads + thread_idx).collect::<Vec<_>>();
+                        for _ in 0..300 {
+                            for value in &values {
+                                set.insert(*value);
+                            }
+                            for value in &values {
+                                set.remove(value);
+                            }
+                        }
+                        for value in &values {
+                            set.insert(*value);
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            for handle in handles {
+                handle.join().unwrap();
+            }
+            assert_eq!(set.len(), threads * 4);
+            assert!((0..threads * 4).all(|value| set.contains(&value)));
+        }
     }
 }
