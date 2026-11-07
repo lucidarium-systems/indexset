@@ -16,7 +16,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `RandomMultiPair` equality, ordering and hashing now only use the key and the discriminator
 
 ### Fixed
-- CDC event IDs are now assigned only after operations commit, keeping them monotonic and free of gaps during concurrent operations
 - `Pair` hashing now matches its key-only equality semantics
 - Inserting an existing key during a concurrent node split now correctly replaces the old value
 - Ranges with excluded borrowed-key bounds now omit all values for the excluded boundary keys
@@ -36,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Concurrent node splits are now retried when the node changed since the split was decided
 - `BTreeMultiMap` with the default `RandomMultiPair` no longer stores an equal key-value pair twice and can remove every pair it holds. Concurrent inserts of the same pair may still both be stored
 - Concurrent ranges and `BTreeMultiMap::get` no longer yield values from outside of their bounds that were inserted while iterating: https://github.com/lucidarium-systems/indexset/issues/68. Such values are now only yielded if they lie between the first and last values in the range when it was created
+
+## [0.16.0] - 2026-04-14
+
+### Fixed
+- CDC event IDs are now assigned only after operations commit, keeping them monotonic and free of gaps during concurrent operations
 
 ## [0.15.0] - 2026-02-14
 
