@@ -419,10 +419,11 @@ where
     /// `range((Excluded(4), Included(10)))` will yield a left-exclusive, right-inclusive
     /// range from 4 to 10.
     ///
-    /// # Panics
+    /// Values inserted while the iterator is in use are only yielded if they lie between the first
+    /// and last values that were in the range when it was created.
     ///
-    /// Panics if range `start > end`.
-    /// Panics if range `start == end` and both bounds are `Excluded`.
+    /// The iterator yields nothing if range `start > end`, or if `start == end` and both bounds
+    /// are `Excluded`.
     ///
     /// # Examples
     ///
@@ -489,6 +490,43 @@ mod tests {
                 .into_iter()
                 .collect::<BTreeSet<_>>()
         );
+    }
+
+    // Regression for https://github.com/lucidarium-systems/indexset/issues/68.
+    #[test]
+    fn test_range_ignores_keys_inserted_outside_of_it() {
+        let map = BTreeMap::<u64, &str>::new();
+        for key in [1, 3, 7, 9] {
+            map.insert(key, "old");
+        }
+
+        let range = map.range(..=5);
+        map.insert(6, "new");
+        assert_eq!(range.map(|(key, _)| *key).collect::<Vec<_>>(), vec![1, 3]);
+
+        let range = map.range(5..);
+        map.insert(4, "new");
+        assert_eq!(range.map(|(key, _)| *key).collect::<Vec<_>>(), vec![6, 7, 9]);
+    }
+
+    #[test]
+    fn test_checked_insert_keeps_existing_value() {
+        let map = BTreeMap::<usize, &str>::new();
+        map.insert(1, "old");
+
+        assert_eq!(map.checked_insert(1, "new"), None);
+        assert_eq!(map.get(&1).map(|entry| entry.get().value), Some("old"));
+        assert_eq!(map.checked_insert(2, "new"), Some(()));
+
+        // A full node takes the split path.
+        let map = BTreeMap::<usize, &str>::new();
+        for key in 0..DEFAULT_INNER_SIZE {
+            map.insert(key, "old");
+        }
+
+        assert_eq!(map.checked_insert(100, "new"), None);
+        assert_eq!(map.get(&100).map(|entry| entry.get().value), Some("old"));
+        assert_eq!(map.len(), DEFAULT_INNER_SIZE);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use std::borrow::Borrow;
 use std::fmt::Debug;
+use std::hash::{Hash, Hasher};
 use std::ops::Bound;
 
 use core::cmp::Ordering;
@@ -14,7 +15,7 @@ use crate::core::pair::Pair;
 use super::{MultiPairLike, MultiPairRemoveHelper};
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Default, Clone, Hash)]
+#[derive(Debug, Default, Clone)]
 pub struct RandomMultiPair<K, V> {
     pub key: K,
     pub value: V,
@@ -28,21 +29,28 @@ impl<K, V> RandomMultiPair<K, V> {
 
 }
 
+// Pairs are identified by their key and discriminator. Comparing values as well would not be a
+// total order, as values are only `PartialEq`.
 impl<K: Ord, V: PartialEq> Eq for RandomMultiPair<K, V> {}
 
 impl<K: Ord, V: PartialEq> PartialEq<Self> for RandomMultiPair<K, V> {
     fn eq(&self, other: &Self) -> bool {
-        self.key.eq(&other.key) && self.value.eq(&other.value)
+        self.key.eq(&other.key) && self.discriminator.eq(&other.discriminator)
     }
 }
 
 impl<K: Ord, V: PartialEq> Ord for RandomMultiPair<K, V> {
     fn cmp(&self, other: &Self) -> Ordering {
-        match self.key.cmp(&other.key) {
-            Ordering::Equal if self.value.eq(&other.value) => Ordering::Equal,
-            Ordering::Equal => self.discriminator.cmp(&other.discriminator),
-            ord => ord,
-        }
+        self.key
+            .cmp(&other.key)
+            .then(self.discriminator.cmp(&other.discriminator))
+    }
+}
+
+impl<K: Hash, V> Hash for RandomMultiPair<K, V> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.key.hash(state);
+        self.discriminator.hash(state);
     }
 }
 
@@ -69,6 +77,25 @@ impl<K: Ord, V: PartialEq> MultiPairLike<K, V> for RandomMultiPair<K, V> {
 
     fn value(&self) -> &V {
         &self.value
+    }
+
+    fn insert_cdc_into<Node>(set: &BTreeSet<Self, Node>, pair: Self) -> (Option<Self>, Vec<ChangeEvent<Self>>)
+    where
+        Self: Debug + Clone + Send + 'static,
+        Node: NodeLike<Self> + Send + 'static,
+    {
+        // The order cannot find an equal pair, so it is looked up among the pairs with the same
+        // key. Concurrent inserts of equal pairs may still both be added.
+        let equal_pair = set
+            .range::<K, _>((Bound::Included(&pair.key), Bound::Included(&pair.key)))
+            .find(|existing_pair| existing_pair.value == pair.value)
+            .cloned();
+
+        if let Some(equal_pair) = equal_pair {
+            return (Some(equal_pair), vec![]);
+        }
+
+        set.put_cdc(pair)
     }
 }
 
@@ -142,6 +169,30 @@ mod test {
         let pair_one = RandomMultiPair::new(1usize, 2usize);
         let pair_two = RandomMultiPair::new(1usize, 3usize);
         assert_ne!(pair_one, pair_two);
+    }
+
+    #[test]
+    fn ord_is_transitive_for_pairs_with_same_key() {
+        let first = RandomMultiPair {
+            key: 1,
+            value: "a",
+            discriminator: 5,
+        };
+        let second = RandomMultiPair {
+            key: 1,
+            value: "b",
+            discriminator: 3,
+        };
+        let third = RandomMultiPair {
+            key: 1,
+            value: "a",
+            discriminator: 1,
+        };
+
+        assert_eq!(first.cmp(&second), Ordering::Greater);
+        assert_eq!(second.cmp(&third), Ordering::Greater);
+        assert_eq!(first.cmp(&third), Ordering::Greater);
+        assert_ne!(first, third);
     }
 
     #[test]

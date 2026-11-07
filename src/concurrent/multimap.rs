@@ -228,6 +228,9 @@ where
     }
     /// Constructs a double-ended iterator over all key value pairs with the given key in the map.
     ///
+    /// Pairs inserted while the iterator is in use are only yielded if they lie between the first
+    /// and last pairs with the key when it was created.
+    ///
     /// ```
     /// use indexset::concurrent::multimap::BTreeMultiMap;
     /// use indexset::BTreeSet;
@@ -267,8 +270,7 @@ where
     pub fn insert(&self, key: K, value: V) -> Option<V> {
         let new_entry = M::new(key, value);
 
-        self.set
-            .put_cdc(new_entry)
+        M::insert_cdc_into(&self.set, new_entry)
             .0
             .map(|pair| pair.into().1)
     }
@@ -279,7 +281,7 @@ where
     pub fn insert_cdc(&self, key: K, value: V) -> (Option<V>, Vec<ChangeEvent<M>>) {
         let new_entry = M::new(key, value);
 
-        let (old_value, cdc) = self.set.put_cdc(new_entry);
+        let (old_value, cdc) = M::insert_cdc_into(&self.set, new_entry);
 
         (old_value.map(|pair| pair.into().1), cdc)
     }
@@ -440,10 +442,11 @@ where
     /// `range((Excluded(4), Included(10)))` will yield a left-exclusive, right-inclusive
     /// range from 4 to 10.
     ///
-    /// # Panics
+    /// Values inserted while the iterator is in use are only yielded if they lie between the first
+    /// and last values that were in the range when it was created.
     ///
-    /// Panics if range `start > end`.
-    /// Panics if range `start == end` and both bounds are `Excluded`.
+    /// The iterator yields nothing if range `start > end`, or if `start == end` and both bounds
+    /// are `Excluded`.
     ///
     /// # Examples
     ///
@@ -515,11 +518,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::BTreeMultiMap;
-    use crate::core::multipair::{MultiPairLike, OrdMultiPair, RandomMultiPair};
+    use crate::core::multipair::{MultiPairLike, MultiPairRemoveHelper, OrdMultiPair, RandomMultiPair};
     use crate::BTreeSet;
     use std::borrow::Borrow;
     use std::fmt::Debug;
     use std::ops::Bound::{Excluded, Unbounded};
+    use std::sync::Arc;
+    use std::thread;
 
     #[test]
     fn test_insert_works_as_expected() {
@@ -630,6 +635,125 @@ mod tests {
 
         let empty_range = map.range(5..).collect::<BTreeSet<_>>();
         assert_eq!(empty_range, vec![].into_iter().collect::<BTreeSet<_>>());
+    }
+
+    fn assert_get_ignores_pairs_inserted_with_other_keys<M>()
+    where
+        M: MultiPairLike<usize, usize> + Borrow<usize> + Debug + Clone + Send + 'static,
+    {
+        let map = BTreeMultiMap::<usize, usize, Vec<M>, M>::new();
+        for value in 100..110 {
+            map.insert(4, value);
+            map.insert(5, value);
+            map.insert(6, value);
+        }
+
+        let get = map.get(&5);
+        for value in 0..100 {
+            map.insert(4, value);
+            map.insert(6, value);
+        }
+
+        let keys = get.map(|(key, _)| *key).collect::<Vec<_>>();
+        assert_eq!(keys, vec![5; 10]);
+    }
+
+    // Regression for https://github.com/lucidarium-systems/indexset/issues/68.
+    #[test]
+    fn test_get_ignores_pairs_inserted_with_other_keys() {
+        assert_get_ignores_pairs_inserted_with_other_keys::<RandomMultiPair<usize, usize>>();
+        assert_get_ignores_pairs_inserted_with_other_keys::<OrdMultiPair<usize, usize>>();
+    }
+
+    #[test]
+    fn test_concurrent_get_only_returns_requested_key() {
+        let map = Arc::new(BTreeMultiMap::<usize, usize>::with_maximum_node_size(8));
+        for key in 1..=10 {
+            for value in 0..20 {
+                map.insert(key, value);
+            }
+        }
+
+        // Keys next to the smallest, a middle and the largest key keep changing
+        let writer = {
+            let map = Arc::clone(&map);
+            thread::spawn(move || {
+                for value in 1000..6000 {
+                    for key in [0, 6, 11] {
+                        map.insert(key, value);
+                        map.remove(&key, &value);
+                    }
+                }
+            })
+        };
+
+        while !writer.is_finished() {
+            for key in [1, 5, 10] {
+                assert!(
+                    map.get(&key).all(|(found, _)| *found == key),
+                    "get({key}) returned another key"
+                );
+            }
+        }
+        writer.join().unwrap();
+    }
+
+    fn assert_reinserting_pair_keeps_single_copy<M>()
+    where
+        M: MultiPairLike<usize, usize> + Borrow<usize> + Debug + Clone + Send + 'static,
+    {
+        let map = BTreeMultiMap::<usize, usize, Vec<M>, M>::with_maximum_node_size(4);
+        for value in 0..100 {
+            assert_eq!(map.insert(1, value), None);
+        }
+
+        for _ in 0..200 {
+            assert_eq!(map.insert(1, 50), Some(50));
+        }
+
+        assert_eq!(map.iter().filter(|(_, value)| **value == 50).count(), 1);
+        assert_eq!(map.len(), 100);
+    }
+
+    #[test]
+    fn test_reinserting_pair_keeps_single_copy() {
+        assert_reinserting_pair_keeps_single_copy::<RandomMultiPair<usize, usize>>();
+        assert_reinserting_pair_keeps_single_copy::<OrdMultiPair<usize, usize>>();
+    }
+
+    fn assert_remove_finds_every_pair<M>()
+    where
+        M: MultiPairLike<usize, usize>
+            + MultiPairRemoveHelper<usize, usize>
+            + Borrow<usize>
+            + Debug
+            + Clone
+            + Send
+            + 'static,
+    {
+        let map = BTreeMultiMap::<usize, usize, Vec<M>, M>::with_maximum_node_size(4);
+        for value in 0..60 {
+            map.insert(1, value);
+            map.insert(2, value);
+        }
+        for value in (0..60).step_by(3) {
+            map.insert(1, value);
+        }
+
+        for value in 0..60 {
+            assert_eq!(map.remove(&1, &value), Some((1, value)));
+            assert_eq!(map.remove(&1, &value), None);
+        }
+
+        assert_eq!(map.remove(&1, &0), None);
+        assert!(map.get(&1).next().is_none());
+        assert_eq!(map.len(), 60);
+    }
+
+    #[test]
+    fn test_remove_finds_every_pair() {
+        assert_remove_finds_every_pair::<RandomMultiPair<usize, usize>>();
+        assert_remove_finds_every_pair::<OrdMultiPair<usize, usize>>();
     }
 
     #[test]

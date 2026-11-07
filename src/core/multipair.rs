@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 use crate::cdc::change::ChangeEvent;
 use crate::concurrent::set::BTreeSet;
 use crate::core::node::NodeLike;
@@ -19,6 +21,18 @@ pub trait MultiPairLike<K, V>: Into<(K, V)> + Ord {
     fn new(key: K, value: V) -> Self;
     fn key(&self) -> &K;
     fn value(&self) -> &V;
+
+    /// Inserts `pair` into `set`, returning the equal pair it replaced, if any.
+    ///
+    /// This relies on the order of the pairs to find an equal pair, so representations whose
+    /// order cannot tell equal pairs apart have to look them up first.
+    fn insert_cdc_into<Node>(set: &BTreeSet<Self, Node>, pair: Self) -> (Option<Self>, Vec<ChangeEvent<Self>>)
+    where
+        Self: Debug + Clone + Send + 'static,
+        Node: NodeLike<Self> + Send + 'static,
+    {
+        set.put_cdc(pair)
+    }
 }
 
 /// Pair-specific exact-removal strategy used by `BTreeMultiMap`.

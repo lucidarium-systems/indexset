@@ -1,5 +1,6 @@
 use std::borrow::Borrow;
 use std::fmt::Debug;
+use std::hash::{Hash, Hasher};
 
 use core::cmp::Ordering;
 #[cfg(feature = "serde")]
@@ -13,7 +14,7 @@ use crate::core::pair::Pair;
 use super::{MultiPairLike, MultiPairRemoveHelper};
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Default, Clone, Hash)]
+#[derive(Debug, Default, Clone)]
 pub struct OrdMultiPair<K, V> {
     pub key: K,
     pub value: V,
@@ -36,6 +37,13 @@ impl<K: Ord, V: Ord> PartialEq<Self> for OrdMultiPair<K, V> {
 impl<K: Ord, V: Ord> Ord for OrdMultiPair<K, V> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.key.cmp(&other.key).then(self.value.cmp(&other.value))
+    }
+}
+
+impl<K: Hash, V: Hash> Hash for OrdMultiPair<K, V> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.key.hash(state);
+        self.value.hash(state);
     }
 }
 

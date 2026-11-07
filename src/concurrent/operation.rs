@@ -24,12 +24,19 @@ where
     pub fn commit(
         self,
         index: &SkipMap<T, Arc<Mutex<Node>>>,
+        node_capacity: usize,
     ) -> Result<(Option<T>, Vec<ChangeEventUnassigned<T>>), ()> {
         match self {
             Operation::Split(old_node, old_max, value) => {
                 let mut guard = old_node.lock_arc();
                 if let Some(entry) = index.get(&old_max) {
                     if Arc::ptr_eq(entry.value(), &old_node) {
+                        // The node may have changed since the split was decided, in which case the
+                        // insert is retried from the start.
+                        if guard.contains(&value) || !guard.need_to_split(node_capacity, &value) {
+                            return Err(());
+                        }
+
                         let mut cdc = vec![];
                         #[cfg(feature = "cdc")]
                         let max_value = guard.max().expect("node should be non empty if split").clone();
@@ -120,12 +127,24 @@ where
             }
             Operation::UpdateMax(node, old_max) => {
                 let guard = node.lock_arc();
-                if guard.max().is_none() {
-                    return Ok((None, vec![]));
-                }
-                let new_max = guard.max().unwrap();
                 if let Some(entry) = index.get(&old_max) {
                     if Arc::ptr_eq(entry.value(), &node) {
+                        // Concurrent removals may have emptied the node while this operation was
+                        // pending, and they look it up under an outdated max, so it is removed here.
+                        let Some(new_max) = guard.max() else {
+                            let mut cdc = vec![];
+
+                            #[cfg(feature = "cdc")]
+                            {
+                                let node_removal = ChangeEventUnassigned::RemoveNode {
+                                    max_value: old_max.clone(),
+                                };
+                                cdc.push(node_removal);
+                            }
+                            index.remove(&old_max);
+
+                            return Ok((None, cdc));
+                        };
                         let cdc = vec![];
                         return Ok(match new_max.cmp(&old_max) {
                             std::cmp::Ordering::Equal => (None, cdc),
@@ -149,26 +168,31 @@ where
             }
             Operation::MakeUnreachable(node, old_max) => {
                 let guard = node.lock_arc();
-                let new_max = guard.max();
                 if let Some(entry) = index.get(&old_max) {
                     if Arc::ptr_eq(entry.value(), &node) {
-                        return match new_max.cmp(&Some(&old_max)) {
-                            std::cmp::Ordering::Less => {
-                                let mut cdc = vec![];
-
-                                #[cfg(feature = "cdc")]
-                                {
-                                    let node_removal = ChangeEventUnassigned::RemoveNode {
-                                        max_value: old_max.clone(),
-                                    };
-                                    cdc.push(node_removal);
-                                }
+                        // Other threads may have inserted into the node after it was emptied, so it
+                        // is kept and only moved under its new max.
+                        if let Some(new_max) = guard.max() {
+                            if *new_max != old_max {
                                 index.remove(&old_max);
-
-                                Ok((None, cdc))
+                                index.insert(new_max.clone(), node.clone());
                             }
-                            _ => Err(()),
-                        };
+
+                            return Ok((None, vec![]));
+                        }
+
+                        let mut cdc = vec![];
+
+                        #[cfg(feature = "cdc")]
+                        {
+                            let node_removal = ChangeEventUnassigned::RemoveNode {
+                                max_value: old_max.clone(),
+                            };
+                            cdc.push(node_removal);
+                        }
+                        index.remove(&old_max);
+
+                        return Ok((None, cdc));
                     }
                 }
 
