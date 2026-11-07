@@ -1115,10 +1115,8 @@ where
     /// Values inserted while the iterator is in use are only yielded if they lie between the first
     /// and last values that were in the range when it was created.
     ///
-    /// # Panics
-    ///
-    /// Panics if range `start > end`.
-    /// Panics if range `start == end` and both bounds are `Excluded`.
+    /// The iterator yields nothing if range `start > end`, or if `start == end` and both bounds
+    /// are `Excluded`.
     ///
     /// # Examples
     ///

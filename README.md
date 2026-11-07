@@ -161,6 +161,9 @@ their correctness checks during benchmark execution.
 
 * `BTreeMap` is less polished than `BTreeSet`. This crate has been optimised for a leaner `BTreeSet`.
 * `Concurrent` `BtreeSet`, `BTreeMap` and `BTreeMultiMap` do not support `serde` serialization and deserialization nor are they order-statistic trees.
+* The iterators of the concurrent trees, and the values returned by their `get`, keep a node locked until they move
+  past it or are dropped. Calling into the same tree while holding them can deadlock, and the references they yield
+  must not be used after modifying the tree. This will be fixed by yielding owned values instead.
 
 ## Naming
 
